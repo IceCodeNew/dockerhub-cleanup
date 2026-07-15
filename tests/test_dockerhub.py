@@ -10,12 +10,12 @@ import pytest
 
 import dockerhub_cleanup.dockerhub as dockerhub_module
 from dockerhub_cleanup.dockerhub import HUB_API, DockerHubClient
-from dockerhub_cleanup.errors import CleanupError
+from dockerhub_cleanup.errors import CleanupError, HttpNotFoundError
 from dockerhub_cleanup.http import HttpResponse, UrllibTransport
 
 
 class FakeTransport:
-    def __init__(self, responses: list[HttpResponse]):
+    def __init__(self, responses: list[HttpResponse | Exception]):
         self.responses = responses
         self.requests: list[tuple[str, str, Mapping[str, str] | None, bytes | None]] = []
 
@@ -28,7 +28,10 @@ class FakeTransport:
         data: bytes | None = None,
     ) -> HttpResponse:
         self.requests.append((method, url, headers, data))
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
     def __bool__(self) -> bool:
         return False
@@ -38,7 +41,9 @@ def response(payload: object, *, status: int = 200) -> HttpResponse:
     return HttpResponse(status=status, headers={}, body=json.dumps(payload).encode())
 
 
-def client_with_responses(*responses: HttpResponse) -> tuple[DockerHubClient, FakeTransport]:
+def client_with_responses(
+    *responses: HttpResponse | Exception,
+) -> tuple[DockerHubClient, FakeTransport]:
     transport = FakeTransport([response({"access_token": "jwt"}), *responses])
     return DockerHubClient("user", "secret", transport=transport), transport
 
@@ -133,6 +138,27 @@ def test_repositories_accept_relative_hub_pagination() -> None:
 
     assert client.repositories("user") == ["one", "two"]
     assert transport.requests[2][1] == f"{HUB_API}/v2/page/2"
+
+
+def test_pagination_accepts_not_found_after_a_partial_page() -> None:
+    next_url = f"{HUB_API}/v2/page/2?page_size=100"
+    client, _ = client_with_responses(
+        response({"results": [{"name": "one"}], "next": next_url}),
+        HttpNotFoundError("missing final page"),
+    )
+
+    assert client.repositories("user") == ["one"]
+
+
+def test_pagination_rejects_not_found_after_a_full_page() -> None:
+    next_url = f"{HUB_API}/v2/page/2?page_size=1"
+    client, _ = client_with_responses(
+        response({"results": [{"name": "one"}], "next": next_url}),
+        HttpNotFoundError("missing next page"),
+    )
+
+    with pytest.raises(HttpNotFoundError, match="missing next page"):
+        list(client._paginate(f"{HUB_API}/v2/page/1?page_size=1"))
 
 
 def test_pagination_trust_origin_follows_hub_api(
@@ -237,6 +263,19 @@ def test_urllib_transport_sanitizes_http_errors() -> None:
     with (
         patch("urllib.request.urlopen", side_effect=error),
         pytest.raises(CleanupError, match="HTTP 401") as raised,
+    ):
+        UrllibTransport().request("GET", "https://example.test")
+    assert "secret response" not in str(raised.value)
+
+
+def test_urllib_transport_classifies_not_found_errors() -> None:
+    headers = Message()
+    error = urllib.error.HTTPError(
+        "https://example.test", 404, "not found", headers, BytesIO(b"secret response")
+    )
+    with (
+        patch("urllib.request.urlopen", side_effect=error),
+        pytest.raises(HttpNotFoundError, match="HTTP 404") as raised,
     ):
         UrllibTransport().request("GET", "https://example.test")
     assert "secret response" not in str(raised.value)

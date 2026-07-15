@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
-from dockerhub_cleanup.errors import CleanupError
+from dockerhub_cleanup.errors import CleanupError, HttpNotFoundError
 
 
 @dataclass(frozen=True)
@@ -72,6 +72,8 @@ class UrllibTransport:
                         body=response.read(),
                     )
             except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    raise HttpNotFoundError(f"{method} {url} failed with HTTP 404") from exc
                 raise CleanupError(f"{method} {url} failed with HTTP {exc.code}") from exc
             except (urllib.error.URLError, TimeoutError) as exc:
                 if attempt >= self.retries:
