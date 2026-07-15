@@ -64,7 +64,11 @@ def test_resolve_crane_command_looks_up_runtime_default() -> None:
     which.assert_called_once_with("mise")
 
 
-def test_client_logs_in_with_stdin_and_deletes_digest() -> None:
+def test_client_logs_in_with_stdin_and_deletes_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DH_PAT", "ambient-pat")
+    monkeypatch.setenv("DH_COOKIE", "ambient-cookie")
     runner = FakeRunner([ok(), ok()])
     client = CraneClient("user", "pat", runner=runner, command=("crane",))
     config_path = Path(client.docker_config)
@@ -82,6 +86,8 @@ def test_client_logs_in_with_stdin_and_deletes_digest() -> None:
     ]
     assert login_input == "pat"
     assert login_env["DOCKER_CONFIG"] == str(config_path)
+    assert "DH_PAT" not in login_env
+    assert "DH_COOKIE" not in login_env
 
     client.delete_digest("user", "app", "sha256:abc")
     delete_args, delete_input, delete_env = runner.calls[1]
@@ -154,6 +160,7 @@ def test_subprocess_runner_captures_result() -> None:
         "capture_output": True,
         "env": {"PATH": os.defpath},
         "check": False,
+        "timeout": 120.0,
     }
 
 
@@ -163,6 +170,14 @@ def test_subprocess_runner_reports_start_failure() -> None:
         pytest.raises(CleanupError, match="could not start command.*missing"),
     ):
         SubprocessRunner().run(["command"], input_text=None, env={})
+
+
+def test_subprocess_runner_reports_timeout() -> None:
+    with (
+        patch("subprocess.run", side_effect=subprocess.TimeoutExpired("command", 5)),
+        pytest.raises(CleanupError, match="command timed out"),
+    ):
+        SubprocessRunner(timeout=5).run(["command"], input_text=None, env={})
 
 
 def test_default_runner_executes_resolved_command() -> None:
