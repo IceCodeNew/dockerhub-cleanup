@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -120,9 +121,12 @@ class CleanupService:
         *,
         on_deleted: Callable[[Candidate], None] | None = None,
         on_failure: Callable[[DeletionFailure], None] | None = None,
+        manifest_workers: int = 1,
     ) -> ApplyResult:
         """Attempt every planned deletion and aggregate safe failures."""
 
+        if manifest_workers < 1:
+            raise CleanupError("manifest deletion workers must be positive")
         if (
             any(candidate.kind == "untagged" for candidate in plan.candidates)
             and manifest_deletion is None
@@ -155,26 +159,32 @@ class CleanupService:
         while pending_manifests:
             deferred: list[DeletionFailure] = []
             progress = False
-            for candidate in pending_manifests:
-                assert manifest_deletion is not None
-                try:
-                    manifest_deletion.delete_digest(
+            assert manifest_deletion is not None
+            with ThreadPoolExecutor(max_workers=manifest_workers) as executor:
+                attempts = {
+                    executor.submit(
+                        _delete_manifest,
+                        manifest_deletion,
                         plan.namespace,
-                        candidate.repository,
-                        candidate.reference,
-                    )
-                except ReferencedManifestError as exc:
-                    deferred.append(DeletionFailure(candidate, str(exc)))
-                except CleanupError as exc:
-                    failure = DeletionFailure(candidate, str(exc))
-                    failures.append(failure)
-                    if on_failure is not None:
-                        on_failure(failure)
-                else:
-                    deleted.append(candidate)
-                    progress = True
-                    if on_deleted is not None:
-                        on_deleted(candidate)
+                        candidate,
+                    ): candidate
+                    for candidate in pending_manifests
+                }
+                for attempt in as_completed(attempts):
+                    candidate = attempts[attempt]
+                    error = attempt.result()
+                    if isinstance(error, ReferencedManifestError):
+                        deferred.append(DeletionFailure(candidate, str(error)))
+                    elif error is not None:
+                        failure = DeletionFailure(candidate, str(error))
+                        failures.append(failure)
+                        if on_failure is not None:
+                            on_failure(failure)
+                    else:
+                        deleted.append(candidate)
+                        progress = True
+                        if on_deleted is not None:
+                            on_deleted(candidate)
             if not deferred:
                 break
             if not progress:
@@ -185,3 +195,15 @@ class CleanupService:
                 break
             pending_manifests = [failure.candidate for failure in deferred]
         return ApplyResult(tuple(deleted), tuple(failures))
+
+
+def _delete_manifest(
+    deletion: ManifestDeletion,
+    namespace: str,
+    candidate: Candidate,
+) -> CleanupError | None:
+    try:
+        deletion.delete_digest(namespace, candidate.repository, candidate.reference)
+    except CleanupError as exc:
+        return exc
+    return None

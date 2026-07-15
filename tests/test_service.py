@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from threading import Barrier
 
 import pytest
 
@@ -216,6 +217,16 @@ def test_apply_requires_manifest_deletion_before_any_mutation() -> None:
     assert hub.delete_calls == []
 
 
+def test_apply_requires_positive_manifest_workers_before_mutation() -> None:
+    hub = FakeHub()
+    plan = CleanupPlan("user", (Candidate("stale-tag", "one", "old", "reason"),))
+
+    with pytest.raises(CleanupError, match="workers must be positive"):
+        CleanupService(hub).apply(plan, manifest_workers=0)
+
+    assert hub.delete_calls == []
+
+
 def test_apply_continues_after_tag_and_manifest_failures() -> None:
     hub = FakeHub()
     hub.delete_errors["bad"] = CleanupError("tag rejected")
@@ -271,6 +282,31 @@ def test_apply_retries_referenced_manifests_after_dependency_progress() -> None:
     assert [candidate.reference for candidate in result.deleted] == [DIGEST_B, DIGEST_A]
     assert result.failures == ()
     assert [call[2] for call in manifests.calls] == [DIGEST_A, DIGEST_B, DIGEST_A]
+
+
+def test_apply_can_delete_independent_manifests_concurrently() -> None:
+    class ConcurrentManifestDeletion(FakeManifestDeletion):
+        def __init__(self) -> None:
+            super().__init__()
+            self.barrier = Barrier(2)
+
+        def delete_digest(self, namespace: str, repository: str, digest: str) -> None:
+            self.barrier.wait(timeout=1)
+            super().delete_digest(namespace, repository, digest)
+
+    manifests = ConcurrentManifestDeletion()
+    plan = CleanupPlan(
+        "user",
+        (
+            Candidate("untagged", "one", DIGEST_A, "reason"),
+            Candidate("untagged", "one", DIGEST_B, "reason"),
+        ),
+    )
+
+    result = CleanupService(FakeHub()).apply(plan, manifests, manifest_workers=2)
+
+    assert {candidate.reference for candidate in result.deleted} == {DIGEST_A, DIGEST_B}
+    assert result.failures == ()
 
 
 def test_apply_reports_referenced_manifests_when_no_dependency_progress() -> None:

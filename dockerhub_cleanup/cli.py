@@ -27,6 +27,7 @@ from dockerhub_cleanup.service import (
 HubFactory = Callable[[str, str], HubRepository]
 DiscoveryFactory = Callable[[str], DigestDiscovery]
 CraneFactory = Callable[[str, str], AbstractContextManager[ManifestDeletion]]
+MANIFEST_DELETE_WORKERS = 4
 
 
 def cutoff_argument(value: str) -> datetime:
@@ -184,6 +185,7 @@ def _run(
                 crane,
                 on_deleted=report_deleted,
                 on_failure=report_failure,
+                manifest_workers=MANIFEST_DELETE_WORKERS,
             )
     else:
         result = service.apply(
