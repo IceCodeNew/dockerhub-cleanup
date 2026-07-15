@@ -102,6 +102,24 @@ def test_plan_combines_stale_and_untagged_without_duplicate_tag_fetches() -> Non
     assert discovery.calls == [("user", "one")]
     assert [(candidate.kind, candidate.reference) for candidate in plan.candidates] == [
         ("stale-tag", "old"),
+        ("untagged", DIGEST_A),
+        ("untagged", DIGEST_B),
+    ]
+
+
+def test_plan_keeps_digest_referenced_by_a_retained_tag() -> None:
+    hub = FakeHub()
+    hub.tags_by_repository["one"].append(Tag("one", "current", DIGEST_A, CUTOFF, CUTOFF))
+
+    plan = CleanupService(hub, FakeDiscovery()).plan(
+        "user",
+        repositories=["one"],
+        cutoff=CUTOFF,
+        include_untagged=True,
+    )
+
+    assert [(candidate.kind, candidate.reference) for candidate in plan.candidates] == [
+        ("stale-tag", "old"),
         ("untagged", DIGEST_B),
     ]
 

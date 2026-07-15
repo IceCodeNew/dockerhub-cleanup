@@ -94,22 +94,23 @@ class CleanupService:
         candidates: list[Candidate] = []
         for repository in repository_names:
             tags = self._hub.tags(namespace, repository)
+            stale_tags: list[Candidate] = []
             if cutoff is not None:
-                candidates.extend(
-                    select_stale_tags(
-                        tags,
-                        cutoff,
-                        protected_patterns,
-                        include_never_pulled=include_never_pulled,
-                    )
+                stale_tags = select_stale_tags(
+                    tags,
+                    cutoff,
+                    protected_patterns,
+                    include_never_pulled=include_never_pulled,
                 )
+                candidates.extend(stale_tags)
             if include_untagged:
                 assert self._discovery is not None
+                stale_tag_names = {candidate.reference for candidate in stale_tags}
                 candidates.extend(
                     select_untagged_digests(
                         repository,
                         self._discovery.all_digests(namespace, repository),
-                        (tag.digest for tag in tags),
+                        (tag.digest for tag in tags if tag.name not in stale_tag_names),
                     )
                 )
         return CleanupPlan(namespace, tuple(candidates))
