@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
@@ -36,8 +37,16 @@ class HttpTransport(Protocol):
 class UrllibTransport:
     """Perform HTTP requests without exposing credentials in errors."""
 
-    def __init__(self, timeout: float = 30.0):
+    def __init__(
+        self,
+        timeout: float = 30.0,
+        *,
+        retries: int = 0,
+        retry_delay: float = 0.5,
+    ):
         self.timeout = timeout
+        self.retries = retries
+        self.retry_delay = retry_delay
 
     def request(
         self,
@@ -53,16 +62,21 @@ class UrllibTransport:
             method=method,
             headers=dict(headers or {}),
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return HttpResponse(
-                    status=response.status,
-                    headers=dict(response.headers.items()),
-                    body=response.read(),
-                )
-        except urllib.error.HTTPError as exc:
-            raise CleanupError(f"{method} {url} failed with HTTP {exc.code}") from exc
-        except urllib.error.URLError as exc:
-            raise CleanupError(f"{method} {url} failed: {exc.reason}") from exc
-        except TimeoutError as exc:
-            raise CleanupError(f"{method} {url} timed out") from exc
+        attempt = 0
+        while True:
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    return HttpResponse(
+                        status=response.status,
+                        headers=dict(response.headers.items()),
+                        body=response.read(),
+                    )
+            except urllib.error.HTTPError as exc:
+                raise CleanupError(f"{method} {url} failed with HTTP {exc.code}") from exc
+            except (urllib.error.URLError, TimeoutError) as exc:
+                if attempt >= self.retries:
+                    if isinstance(exc, urllib.error.URLError):
+                        raise CleanupError(f"{method} {url} failed: {exc.reason}") from exc
+                    raise CleanupError(f"{method} {url} timed out") from exc
+                time.sleep(self.retry_delay * 2**attempt)
+                attempt += 1

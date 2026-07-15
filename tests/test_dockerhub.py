@@ -1,4 +1,5 @@
 import json
+import time
 import urllib.error
 from collections.abc import Mapping
 from email.message import Message
@@ -255,3 +256,24 @@ def test_urllib_transport_reports_timeouts() -> None:
         pytest.raises(CleanupError, match="timed out"),
     ):
         UrllibTransport().request("GET", "https://example.test")
+
+
+def test_urllib_transport_retries_transient_errors_with_backoff() -> None:
+    raw_response = MagicMock()
+    raw_response.__enter__.return_value = raw_response
+    raw_response.status = 200
+    raw_response.headers.items.return_value = []
+    raw_response.read.return_value = b"{}"
+
+    with (
+        patch(
+            "urllib.request.urlopen",
+            side_effect=[urllib.error.URLError("offline"), TimeoutError, raw_response],
+        ) as urlopen,
+        patch.object(time, "sleep") as sleep,
+    ):
+        result = UrllibTransport(retries=2, retry_delay=0.25).request("GET", "https://example.test")
+
+    assert result == HttpResponse(200, {}, b"{}")
+    assert urlopen.call_count == 3
+    assert [call.args[0] for call in sleep.call_args_list] == [0.25, 0.5]
