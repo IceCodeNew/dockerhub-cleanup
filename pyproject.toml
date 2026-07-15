@@ -6,6 +6,7 @@ build-backend = "uv_build"
 name = "dockerhub-cleanup"
 version = "0.1.0"
 description = "Safely preview and clean stale or untagged Docker Hub images"
+readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = []
