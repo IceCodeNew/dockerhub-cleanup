@@ -28,6 +28,9 @@ class FakeTransport:
         self.requests.append((method, url, headers, data))
         return self.responses.pop(0)
 
+    def __bool__(self) -> bool:
+        return False
+
 
 def response(payload: object, *, status: int = 200) -> HttpResponse:
     return HttpResponse(status=status, headers={}, body=json.dumps(payload).encode())
@@ -36,6 +39,13 @@ def response(payload: object, *, status: int = 200) -> HttpResponse:
 def client_with_responses(*responses: HttpResponse) -> tuple[DockerHubClient, FakeTransport]:
     transport = FakeTransport([response({"access_token": "jwt"}), *responses])
     return DockerHubClient("user", "secret", transport=transport), transport
+
+
+def test_client_creates_default_transport() -> None:
+    transport = FakeTransport([response({"access_token": "jwt"})])
+    with patch("dockerhub_cleanup.dockerhub.UrllibTransport", return_value=transport) as factory:
+        DockerHubClient("user", "secret")
+    factory.assert_called_once_with()
 
 
 def test_authentication_sends_credentials_only_in_request_body() -> None:
@@ -220,5 +230,13 @@ def test_urllib_transport_reports_network_errors() -> None:
     with (
         patch("urllib.request.urlopen", side_effect=urllib.error.URLError("offline")),
         pytest.raises(CleanupError, match="offline"),
+    ):
+        UrllibTransport().request("GET", "https://example.test")
+
+
+def test_urllib_transport_reports_timeouts() -> None:
+    with (
+        patch("urllib.request.urlopen", side_effect=TimeoutError),
+        pytest.raises(CleanupError, match="timed out"),
     ):
         UrllibTransport().request("GET", "https://example.test")

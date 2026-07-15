@@ -44,25 +44,29 @@ class SubprocessRunner:
         input_text: str | None,
         env: Mapping[str, str],
     ) -> CommandResult:
-        result = subprocess.run(
-            list(args),
-            input=input_text,
-            text=True,
-            capture_output=True,
-            env=dict(env),
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                list(args),
+                input=input_text,
+                text=True,
+                capture_output=True,
+                env=dict(env),
+                check=False,
+            )
+        except OSError as exc:
+            raise CleanupError(f"could not start {args[0]}: {exc}") from exc
         return CommandResult(result.returncode, result.stdout, result.stderr)
 
 
 def resolve_crane_command(
-    which: Callable[[str], str | None] = shutil.which,
+    which: Callable[[str], str | None] | None = None,
 ) -> tuple[str, ...]:
     """Prefer mise-managed crane, then fall back to a PATH binary."""
 
-    if which("mise"):
+    find_command = shutil.which if which is None else which
+    if find_command("mise"):
         return ("mise", "exec", "--", "crane")
-    if which("crane"):
+    if find_command("crane"):
         return ("crane",)
     raise CleanupError("crane is unavailable; install it directly or through mise")
 
@@ -78,24 +82,27 @@ class CraneClient:
         runner: CommandRunner | None = None,
         command: Sequence[str] | None = None,
     ):
-        self._runner = runner or SubprocessRunner()
+        self._runner = SubprocessRunner() if runner is None else runner
         self._command = tuple(command) if command is not None else resolve_crane_command()
         self._temporary = tempfile.TemporaryDirectory(prefix="dockerhub-cleanup-")
         self._env = {**os.environ, "DOCKER_CONFIG": self._temporary.name}
-        self._pat = pat
-        result = self._runner.run(
-            [
-                *self._command,
-                "auth",
-                "login",
-                "index.docker.io",
-                "-u",
-                username,
-                "--password-stdin",
-            ],
-            input_text=pat,
-            env=self._env,
-        )
+        try:
+            result = self._runner.run(
+                [
+                    *self._command,
+                    "auth",
+                    "login",
+                    "index.docker.io",
+                    "-u",
+                    username,
+                    "--password-stdin",
+                ],
+                input_text=pat,
+                env=self._env,
+            )
+        except Exception:
+            self.close()
+            raise
         if result.returncode:
             self.close()
             raise CleanupError(f"crane login failed: {_redact(result.stderr, pat)}")

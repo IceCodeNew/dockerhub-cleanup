@@ -16,7 +16,7 @@ from dockerhub_cleanup.errors import CleanupError
 
 
 class FakeRunner:
-    def __init__(self, results: list[CommandResult]):
+    def __init__(self, results: list[CommandResult | Exception]):
         self.results = results
         self.calls: list[tuple[list[str], str | None, Mapping[str, str]]] = []
 
@@ -28,7 +28,10 @@ class FakeRunner:
         env: Mapping[str, str],
     ) -> CommandResult:
         self.calls.append((list(args), input_text, env))
-        return self.results.pop(0)
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 def ok() -> CommandResult:
@@ -53,6 +56,12 @@ def test_resolve_crane_command_falls_back_to_binary() -> None:
 def test_resolve_crane_command_requires_an_installation() -> None:
     with pytest.raises(CleanupError, match="unavailable"):
         resolve_crane_command(lambda _name: None)
+
+
+def test_resolve_crane_command_looks_up_runtime_default() -> None:
+    with patch("dockerhub_cleanup.crane.shutil.which", return_value="/bin/mise") as which:
+        assert resolve_crane_command() == ("mise", "exec", "--", "crane")
+    which.assert_called_once_with("mise")
 
 
 def test_client_logs_in_with_stdin_and_deletes_digest() -> None:
@@ -111,6 +120,16 @@ def test_login_failure_handles_empty_secret() -> None:
         CraneClient("user", "", runner=runner, command=("crane",))
 
 
+def test_login_exception_cleans_up_temporary_config() -> None:
+    runner = FakeRunner([CleanupError("runner failed")])
+
+    with pytest.raises(CleanupError, match="runner failed"):
+        CraneClient("user", "pat", runner=runner, command=("crane",))
+
+    config_path = Path(runner.calls[0][2]["DOCKER_CONFIG"])
+    assert not config_path.exists()
+
+
 def test_delete_failure_reports_reference() -> None:
     runner = FakeRunner([ok(), CommandResult(1, "", "still referenced")])
     with (
@@ -136,6 +155,14 @@ def test_subprocess_runner_captures_result() -> None:
         "env": {"PATH": os.defpath},
         "check": False,
     }
+
+
+def test_subprocess_runner_reports_start_failure() -> None:
+    with (
+        patch("subprocess.run", side_effect=FileNotFoundError("missing")),
+        pytest.raises(CleanupError, match="could not start command.*missing"),
+    ):
+        SubprocessRunner().run(["command"], input_text=None, env={})
 
 
 def test_default_runner_executes_resolved_command() -> None:

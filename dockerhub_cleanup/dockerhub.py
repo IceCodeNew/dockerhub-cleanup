@@ -24,7 +24,7 @@ class DockerHubClient:
         *,
         transport: HttpTransport | None = None,
     ):
-        self._transport = transport or UrllibTransport()
+        self._transport = UrllibTransport() if transport is None else transport
         self._token = self._authenticate(username, pat)
 
     @property

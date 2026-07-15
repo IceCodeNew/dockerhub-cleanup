@@ -27,7 +27,7 @@ class ImageManagementClient:
                 "untagged discovery needs DH_COOKIE from an authenticated Docker Hub session"
             )
         self._cookie = cookie
-        self._transport = transport or UrllibTransport()
+        self._transport = UrllibTransport() if transport is None else transport
 
     @property
     def headers(self) -> Mapping[str, str]:
