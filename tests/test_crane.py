@@ -172,6 +172,11 @@ def test_subprocess_runner_reports_start_failure() -> None:
         SubprocessRunner().run(["command"], input_text=None, env={})
 
 
+def test_subprocess_runner_rejects_empty_command() -> None:
+    with pytest.raises(CleanupError, match="command cannot be empty"):
+        SubprocessRunner().run([], input_text=None, env={})
+
+
 def test_subprocess_runner_reports_timeout() -> None:
     with (
         patch("subprocess.run", side_effect=subprocess.TimeoutExpired("command", 5)),

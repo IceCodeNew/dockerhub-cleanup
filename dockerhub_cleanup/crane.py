@@ -50,6 +50,8 @@ class SubprocessRunner:
         input_text: str | None,
         env: Mapping[str, str],
     ) -> CommandResult:
+        if not args:
+            raise CleanupError("command cannot be empty")
         try:
             result = subprocess.run(
                 list(args),
