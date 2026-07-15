@@ -1,0 +1,81 @@
+# 设计
+
+## 架构
+
+项目按依赖方向分为四层：
+
+```text
+CLI -> cleanup service -> domain policies
+                    -> Docker Hub adapter
+                    -> Image Management adapter
+                    -> crane adapter
+```
+
+核心策略不直接调用网络、读取环境变量或启动子进程。Docker Hub、网页会话和 `crane` 都通过窄接口接入，使候选选择与执行流程可以使用内存 fake 完整测试。
+
+## 领域模型
+
+`Tag` 保存仓库、名称、digest、最后拉取时间和最后 push 时间。`Candidate` 保存候选类型、仓库、reference 和可审计原因。
+
+通用策略包含：
+
+- 解析绝对或相对截止时间。
+- 根据 cutoff、never-pulled 开关和保护模式筛选 stale tag。
+- 从任意 JSON 结构提取规范 SHA-256 digest。
+- 以集合差计算未被 tag 引用的 digest。
+
+所有时间进入领域层前统一为 UTC aware `datetime`。无时区的 Docker Hub 值视为 UTC；CLI 提供的绝对时间必须可明确归一化。
+
+## Docker Hub 适配器
+
+PAT 先通过 `POST /v2/auth/token` 换取短期 JWT。后续 Hub API 请求使用 Bearer JWT，并沿响应中的 `next` URL 分页：
+
+- `GET /v2/namespaces/{namespace}/repositories`
+- `GET /v2/namespaces/{namespace}/repositories/{repository}/tags`
+- `DELETE /v2/namespaces/{namespace}/repositories/{repository}/tags/{tag}`
+
+适配器负责 URL 编码、响应结构校验和把 API 字段转换为领域模型。HTTP 错误统一转换为不包含认证信息的应用异常。
+
+## 无 tag 发现
+
+标准 OCI Distribution API 的 `/tags/list` 不返回无 tag manifest。Docker Hub 网页的 Image Management 当前通过以下会话接口获取仓库中的 image 和 index：
+
+```text
+/repository/docker/{namespace}/{repository}/image-management.data
+```
+
+第一次请求使用 GET，后续页使用带 `lastEvaluatedKey` 的 POST。适配器递归提取响应中的规范 SHA-256 digest，并拒绝重复分页游标，避免接口变化导致无限循环或不完整删除。
+
+发现流程得到全部 digest 后，与公开 Hub API 返回的当前 tag digest 做差。Cookie 不进入领域模型，也不传递给 `crane`。
+
+## 删除执行
+
+stale tag 通过 Hub API 删除，以保留共享同一 manifest 的其他 tag。
+
+无 tag digest 通过以下形式交给 `crane`：
+
+```text
+crane delete index.docker.io/{namespace}/{repository}@{digest}
+```
+
+适配器优先使用 mise 中的 `crane`，缺少 mise 时才查找 PATH 中的独立二进制。执行前在临时目录中完成 `crane auth login --password-stdin`，并通过 `DOCKER_CONFIG` 隔离认证状态。
+
+## 应用流程
+
+1. CLI 在任何认证前验证策略选择和 apply 确认。
+2. 使用 PAT 创建 Docker Hub 客户端。
+3. 确定目标仓库列表。
+4. 对每个仓库收集 tag，并执行所选领域策略。
+5. 输出完整 dry-run 计划。
+6. apply 模式下先逐个删除 stale tag，再在单个临时 crane 会话中逐个删除无 tag digest。
+7. 汇总失败并以非零状态退出。
+
+任何发现阶段错误都会在删除开始前终止，确保不会使用部分候选清单执行变更。
+
+## 测试边界
+
+- 领域测试覆盖时间解析、保护模式、never-pulled 语义、digest 提取和集合差。
+- Hub 适配器测试使用可注入 HTTP transport，覆盖认证、分页、URL 编码、响应校验与错误脱敏。
+- Image Management 测试覆盖 GET/POST 分页、重复游标和 Cookie 缺失。
+- crane 测试使用临时目录与 fake runner，断言命令、标准输入和 `DOCKER_CONFIG`，不调用真实注册表。
+- CLI 与 service 测试使用 fake adapters，覆盖 dry-run、确认门槛、部分失败及退出状态。
