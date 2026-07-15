@@ -37,13 +37,17 @@ uv sync --frozen
 
 ```bash
 export DH_USERNAME='your-docker-id'
-read -s 'DH_PAT?Docker Hub PAT: '; export DH_PAT; echo
+IFS= read -r -s -p 'Docker Hub PAT: ' DH_PAT
+printf '\n'
+export DH_PAT
 ```
 
 只有启用 `--untagged` 时才需要 `DH_COOKIE`。登录 `hub.docker.com`，从浏览器开发者工具 Network 中任一 `hub.docker.com` 请求复制完整 `Cookie` 请求头值，然后临时设置：
 
 ```bash
-read -s 'DH_COOKIE?Docker Hub Cookie: '; export DH_COOKIE; echo
+IFS= read -r -s -p 'Docker Hub Cookie: ' DH_COOKIE
+printf '\n'
+export DH_COOKIE
 ```
 
 浏览器 Cookie 会过期，且依赖 Docker Hub 未公开的网页接口。接口变化时工具会安全失败，不会使用不完整清单执行删除。
