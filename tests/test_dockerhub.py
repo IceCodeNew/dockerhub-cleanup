@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import dockerhub_cleanup.dockerhub as dockerhub_module
 from dockerhub_cleanup.dockerhub import HUB_API, DockerHubClient
 from dockerhub_cleanup.errors import CleanupError
 from dockerhub_cleanup.http import HttpResponse, UrllibTransport
@@ -131,6 +132,20 @@ def test_repositories_accept_relative_hub_pagination() -> None:
 
     assert client.repositories("user") == ["one", "two"]
     assert transport.requests[2][1] == f"{HUB_API}/v2/page/2"
+
+
+def test_pagination_trust_origin_follows_hub_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alternate_hub = "https://mirror.example.test"
+    monkeypatch.setattr(dockerhub_module, "HUB_API", alternate_hub)
+    client, transport = client_with_responses(
+        response({"results": [{"name": "one"}], "next": "/v2/page/2"}),
+        response({"results": [{"name": "two"}], "next": None}),
+    )
+
+    assert client.repositories("user") == ["one", "two"]
+    assert transport.requests[2][1] == f"{alternate_hub}/v2/page/2"
 
 
 def test_tags_parse_metadata_and_encode_path_parts() -> None:

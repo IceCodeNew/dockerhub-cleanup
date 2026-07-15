@@ -152,6 +152,10 @@ def _tag_timestamp(item: Mapping[str, object], key: str) -> datetime | None:
 def _trusted_hub_url(url: str) -> str:
     resolved = urllib.parse.urljoin(f"{HUB_API}/", url)
     parsed = urllib.parse.urlsplit(resolved)
-    if (parsed.scheme.lower(), parsed.netloc.lower()) != ("https", "hub.docker.com"):
+    hub = urllib.parse.urlsplit(HUB_API)
+    if (parsed.scheme.lower(), parsed.netloc.lower()) != (
+        hub.scheme.lower(),
+        hub.netloc.lower(),
+    ):
         raise CleanupError("Docker Hub pagination returned an untrusted URL")
     return resolved
