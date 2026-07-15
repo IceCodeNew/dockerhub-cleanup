@@ -138,12 +138,16 @@ def test_subprocess_runner_captures_result() -> None:
     }
 
 
-def test_default_dependencies_resolve_and_create_runner() -> None:
+def test_default_runner_executes_resolved_command() -> None:
     completed = MagicMock(returncode=0, stdout="", stderr="")
     with (
-        patch("shutil.which", return_value="/bin/mise"),
+        patch(
+            "dockerhub_cleanup.crane.resolve_crane_command",
+            return_value=("resolved-crane",),
+        ) as resolve,
         patch("subprocess.run", return_value=completed) as run,
         CraneClient("user", "pat") as client,
     ):
         assert client.docker_config
-    assert run.called
+    resolve.assert_called_once_with()
+    assert run.call_args.args[0][:2] == ["resolved-crane", "auth"]
