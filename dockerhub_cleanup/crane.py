@@ -148,9 +148,9 @@ class CraneClient:
             env=self._env,
         )
         if result.returncode:
-            message = f"crane delete {reference} failed: {result.stderr.strip()}"
+            message = f"crane delete {reference} failed"
             if "cannot be deleted as it is referenced by other images" in result.stderr:
-                raise ReferencedManifestError(message)
+                raise ReferencedManifestError(f"{message}: manifest is referenced by other images")
             raise CleanupError(message)
 
 

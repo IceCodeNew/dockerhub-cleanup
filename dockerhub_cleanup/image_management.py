@@ -29,7 +29,11 @@ class ImageManagementClient:
                 "untagged discovery needs DH_COOKIE from an authenticated Docker Hub session"
             )
         self._cookie = cookie
-        self._transport = UrllibTransport(retries=2) if transport is None else transport
+        self._transport = (
+            UrllibTransport(retries=2, retry_methods=frozenset({"GET", "POST"}))
+            if transport is None
+            else transport
+        )
 
     @property
     def headers(self) -> Mapping[str, str]:
@@ -106,7 +110,7 @@ def _next_cursor(payload: object) -> str | None:
                 continue
             if cursor_reference == UNDEFINED_REFERENCE:
                 return None
-            if not (isinstance(cursor_reference, int) and 0 <= cursor_reference < len(payload)):
+            if not (type(cursor_reference) is int and 0 <= cursor_reference < len(payload)):
                 raise CleanupError("Image Management returned an invalid pagination cursor")
             cursor = payload[cursor_reference]
             if not isinstance(cursor, str):

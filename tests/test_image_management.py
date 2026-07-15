@@ -50,7 +50,10 @@ def test_client_creates_default_transport() -> None:
     ) as factory:
         client = ImageManagementClient("session=secret")
         assert client.all_digests("user", "app") == set()
-    factory.assert_called_once_with(retries=2)
+    factory.assert_called_once_with(
+        retries=2,
+        retry_methods=frozenset({"GET", "POST"}),
+    )
 
 
 def test_single_page_discovery_encodes_path_and_sends_session_headers() -> None:
@@ -133,6 +136,7 @@ def test_unrelated_encoded_fields_do_not_start_pagination() -> None:
         {},
         [{"_1": 2}, "lastEvaluatedKey"],
         [{"_1": 2}, "lastEvaluatedKey", 3],
+        [{"_1": True}, "lastEvaluatedKey"],
     ],
 )
 def test_invalid_response_or_cursor_is_rejected(payload: object) -> None:

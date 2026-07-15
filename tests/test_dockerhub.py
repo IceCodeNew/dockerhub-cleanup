@@ -52,7 +52,10 @@ def test_client_creates_default_transport() -> None:
     transport = FakeTransport([response({"access_token": "jwt"})])
     with patch("dockerhub_cleanup.dockerhub.UrllibTransport", return_value=transport) as factory:
         DockerHubClient("user", "secret")
-    factory.assert_called_once_with()
+    factory.assert_called_once_with(
+        retries=2,
+        retry_methods=frozenset({"GET", "POST"}),
+    )
 
 
 def test_authentication_sends_credentials_only_in_request_body() -> None:
@@ -316,3 +319,40 @@ def test_urllib_transport_retries_transient_errors_with_backoff() -> None:
     assert result == HttpResponse(200, {}, b"{}")
     assert urlopen.call_count == 3
     assert [call.args[0] for call in sleep.call_args_list] == [0.25, 0.5]
+
+
+@pytest.mark.parametrize(("status", "retry_after", "delay"), [(429, "60", 30.0), (503, None, 0.5)])
+def test_urllib_transport_retries_transient_http_errors(
+    status: int, retry_after: str | None, delay: float
+) -> None:
+    raw_response = MagicMock()
+    raw_response.__enter__.return_value = raw_response
+    raw_response.status = 200
+    raw_response.headers.items.return_value = []
+    raw_response.read.return_value = b"{}"
+    headers = Message()
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
+    error = urllib.error.HTTPError("https://example.test", status, "retry", headers, None)
+
+    with (
+        patch("urllib.request.urlopen", side_effect=[error, raw_response]) as urlopen,
+        patch.object(time, "sleep") as sleep,
+    ):
+        result = UrllibTransport(retries=1).request("GET", "https://example.test")
+
+    assert result == HttpResponse(200, {}, b"{}")
+    assert urlopen.call_count == 2
+    sleep.assert_called_once_with(delay)
+
+
+def test_urllib_transport_does_not_retry_delete_network_errors() -> None:
+    with (
+        patch("urllib.request.urlopen", side_effect=urllib.error.URLError("offline")) as urlopen,
+        patch.object(time, "sleep") as sleep,
+        pytest.raises(CleanupError, match="offline"),
+    ):
+        UrllibTransport(retries=2).request("DELETE", "https://example.test")
+
+    urlopen.assert_called_once()
+    sleep.assert_not_called()
