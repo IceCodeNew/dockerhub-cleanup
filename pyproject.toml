@@ -10,6 +10,9 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = []
 
+[project.scripts]
+dockerhub-cleanup = "dockerhub_cleanup.cli:main"
+
 [dependency-groups]
 dev = [
   "pytest>=9,<10",
