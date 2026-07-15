@@ -52,7 +52,7 @@ def test_authentication_sends_credentials_only_in_request_body() -> None:
     }
 
 
-@pytest.mark.parametrize("payload", [{}, [], {"access_token": 3}])
+@pytest.mark.parametrize("payload", [{}, [], {"access_token": 3}, {"access_token": ""}])
 def test_authentication_rejects_missing_access_token(payload: object) -> None:
     with pytest.raises(CleanupError, match="no access token"):
         DockerHubClient("user", "secret", transport=FakeTransport([response(payload)]))
@@ -103,6 +103,26 @@ def test_repositories_reject_repeated_page_url() -> None:
         client.repositories("user")
 
 
+def test_repositories_reject_cross_origin_pagination() -> None:
+    client, transport = client_with_responses(
+        response({"results": [], "next": "https://example.test/steal-token"})
+    )
+
+    with pytest.raises(CleanupError, match="untrusted URL"):
+        client.repositories("user")
+    assert len(transport.requests) == 2
+
+
+def test_repositories_accept_relative_hub_pagination() -> None:
+    client, transport = client_with_responses(
+        response({"results": [{"name": "one"}], "next": "/v2/page/2"}),
+        response({"results": [{"name": "two"}], "next": None}),
+    )
+
+    assert client.repositories("user") == ["one", "two"]
+    assert transport.requests[2][1] == f"{HUB_API}/v2/page/2"
+
+
 def test_tags_parse_metadata_and_encode_path_parts() -> None:
     client, transport = client_with_responses(
         response(
@@ -133,6 +153,10 @@ def test_tags_parse_metadata_and_encode_path_parts() -> None:
         ({"name": "tag"}, "incomplete tag"),
         ({"name": "tag", "digest": "digest", "tag_last_pulled": 3}, "last_pulled"),
         ({"name": "tag", "digest": "digest", "tag_last_pushed": 3}, "last_pushed"),
+        (
+            {"name": "tag", "digest": "digest", "tag_last_pulled": "not-a-time"},
+            "last_pulled",
+        ),
     ],
 )
 def test_tags_validate_metadata(item: object, message: str) -> None:

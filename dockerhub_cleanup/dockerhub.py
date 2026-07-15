@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import urllib.parse
 from collections.abc import Iterator, Mapping
+from datetime import datetime
 
 from dockerhub_cleanup.domain import Tag, parse_api_timestamp
 from dockerhub_cleanup.errors import CleanupError
@@ -43,7 +44,7 @@ class DockerHubClient:
             data=json.dumps({"identifier": username, "secret": pat}).encode(),
         )
         token = payload.get("access_token") if isinstance(payload, dict) else None
-        if not isinstance(token, str):
+        if not isinstance(token, str) or not token:
             raise CleanupError("Docker Hub authentication returned no access token")
         return token
 
@@ -85,7 +86,7 @@ class DockerHubClient:
             next_url = payload.get("next")
             if next_url is not None and not isinstance(next_url, str):
                 raise CleanupError(f"unexpected pagination URL from {url}")
-            url = next_url or ""
+            url = _trusted_hub_url(next_url) if next_url else ""
 
     def repositories(self, namespace: str) -> list[str]:
         """List every visible repository in a namespace."""
@@ -120,8 +121,8 @@ class DockerHubClient:
                     repository=repository,
                     name=name,
                     digest=digest,
-                    last_pulled=parse_api_timestamp(_optional_string(item, "tag_last_pulled")),
-                    last_pushed=parse_api_timestamp(_optional_string(item, "tag_last_pushed")),
+                    last_pulled=_tag_timestamp(item, "tag_last_pulled"),
+                    last_pushed=_tag_timestamp(item, "tag_last_pushed"),
                 )
             )
         return tags
@@ -139,3 +140,18 @@ def _optional_string(item: Mapping[str, object], key: str) -> str | None:
     if value is None or isinstance(value, str):
         return value
     raise CleanupError(f"Docker Hub returned invalid {key} metadata")
+
+
+def _tag_timestamp(item: Mapping[str, object], key: str) -> datetime | None:
+    try:
+        return parse_api_timestamp(_optional_string(item, key))
+    except ValueError as exc:
+        raise CleanupError(f"Docker Hub returned invalid {key} metadata") from exc
+
+
+def _trusted_hub_url(url: str) -> str:
+    resolved = urllib.parse.urljoin(f"{HUB_API}/", url)
+    parsed = urllib.parse.urlsplit(resolved)
+    if (parsed.scheme.lower(), parsed.netloc.lower()) != ("https", "hub.docker.com"):
+        raise CleanupError("Docker Hub pagination returned an untrusted URL")
+    return resolved
