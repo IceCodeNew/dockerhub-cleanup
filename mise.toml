@@ -9,7 +9,7 @@ run = "uv run --frozen pytest"
 
 [tasks.coverage]
 description = "Run branch coverage"
-run = "uv run --frozen pytest --cov=dockerhub_cleanup --cov-branch --cov-report=term-missing --cov-report=xml"
+run = "uv run --frozen pytest --cov=dockerhub_cleanup --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=100"
 
 [tasks.lint]
 description = "Run static checks"
