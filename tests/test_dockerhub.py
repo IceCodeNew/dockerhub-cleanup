@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import dockerhub_cleanup.dockerhub as dockerhub_module
 from dockerhub_cleanup.dockerhub import HUB_API, DockerHubClient
 from dockerhub_cleanup.errors import CleanupError
 from dockerhub_cleanup.http import HttpResponse, UrllibTransport
@@ -28,6 +29,9 @@ class FakeTransport:
         self.requests.append((method, url, headers, data))
         return self.responses.pop(0)
 
+    def __bool__(self) -> bool:
+        return False
+
 
 def response(payload: object, *, status: int = 200) -> HttpResponse:
     return HttpResponse(status=status, headers={}, body=json.dumps(payload).encode())
@@ -36,6 +40,13 @@ def response(payload: object, *, status: int = 200) -> HttpResponse:
 def client_with_responses(*responses: HttpResponse) -> tuple[DockerHubClient, FakeTransport]:
     transport = FakeTransport([response({"access_token": "jwt"}), *responses])
     return DockerHubClient("user", "secret", transport=transport), transport
+
+
+def test_client_creates_default_transport() -> None:
+    transport = FakeTransport([response({"access_token": "jwt"})])
+    with patch("dockerhub_cleanup.dockerhub.UrllibTransport", return_value=transport) as factory:
+        DockerHubClient("user", "secret")
+    factory.assert_called_once_with()
 
 
 def test_authentication_sends_credentials_only_in_request_body() -> None:
@@ -52,7 +63,7 @@ def test_authentication_sends_credentials_only_in_request_body() -> None:
     }
 
 
-@pytest.mark.parametrize("payload", [{}, [], {"access_token": 3}])
+@pytest.mark.parametrize("payload", [{}, [], {"access_token": 3}, {"access_token": ""}])
 def test_authentication_rejects_missing_access_token(payload: object) -> None:
     with pytest.raises(CleanupError, match="no access token"):
         DockerHubClient("user", "secret", transport=FakeTransport([response(payload)]))
@@ -103,6 +114,40 @@ def test_repositories_reject_repeated_page_url() -> None:
         client.repositories("user")
 
 
+def test_repositories_reject_cross_origin_pagination() -> None:
+    client, transport = client_with_responses(
+        response({"results": [], "next": "https://example.test/steal-token"})
+    )
+
+    with pytest.raises(CleanupError, match="untrusted URL"):
+        client.repositories("user")
+    assert len(transport.requests) == 2
+
+
+def test_repositories_accept_relative_hub_pagination() -> None:
+    client, transport = client_with_responses(
+        response({"results": [{"name": "one"}], "next": "/v2/page/2"}),
+        response({"results": [{"name": "two"}], "next": None}),
+    )
+
+    assert client.repositories("user") == ["one", "two"]
+    assert transport.requests[2][1] == f"{HUB_API}/v2/page/2"
+
+
+def test_pagination_trust_origin_follows_hub_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alternate_hub = "https://mirror.example.test"
+    monkeypatch.setattr(dockerhub_module, "HUB_API", alternate_hub)
+    client, transport = client_with_responses(
+        response({"results": [{"name": "one"}], "next": "/v2/page/2"}),
+        response({"results": [{"name": "two"}], "next": None}),
+    )
+
+    assert client.repositories("user") == ["one", "two"]
+    assert transport.requests[2][1] == f"{alternate_hub}/v2/page/2"
+
+
 def test_tags_parse_metadata_and_encode_path_parts() -> None:
     client, transport = client_with_responses(
         response(
@@ -133,6 +178,10 @@ def test_tags_parse_metadata_and_encode_path_parts() -> None:
         ({"name": "tag"}, "incomplete tag"),
         ({"name": "tag", "digest": "digest", "tag_last_pulled": 3}, "last_pulled"),
         ({"name": "tag", "digest": "digest", "tag_last_pushed": 3}, "last_pushed"),
+        (
+            {"name": "tag", "digest": "digest", "tag_last_pulled": "not-a-time"},
+            "last_pulled",
+        ),
     ],
 )
 def test_tags_validate_metadata(item: object, message: str) -> None:
@@ -196,5 +245,13 @@ def test_urllib_transport_reports_network_errors() -> None:
     with (
         patch("urllib.request.urlopen", side_effect=urllib.error.URLError("offline")),
         pytest.raises(CleanupError, match="offline"),
+    ):
+        UrllibTransport().request("GET", "https://example.test")
+
+
+def test_urllib_transport_reports_timeouts() -> None:
+    with (
+        patch("urllib.request.urlopen", side_effect=TimeoutError),
+        pytest.raises(CleanupError, match="timed out"),
     ):
         UrllibTransport().request("GET", "https://example.test")

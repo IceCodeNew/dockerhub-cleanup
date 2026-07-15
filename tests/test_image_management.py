@@ -1,6 +1,7 @@
 import json
 import urllib.parse
 from collections.abc import Mapping
+from unittest.mock import patch
 
 import pytest
 
@@ -25,6 +26,9 @@ class FakeTransport:
         self.requests.append((method, url, headers, data))
         return self.responses.pop(0)
 
+    def __bool__(self) -> bool:
+        return False
+
 
 def response(payload: object) -> HttpResponse:
     return HttpResponse(200, {}, json.dumps(payload).encode())
@@ -33,6 +37,16 @@ def response(payload: object) -> HttpResponse:
 def test_cookie_is_required() -> None:
     with pytest.raises(CleanupError, match="DH_COOKIE"):
         ImageManagementClient("")
+
+
+def test_client_creates_default_transport() -> None:
+    transport = FakeTransport([response([])])
+    with patch(
+        "dockerhub_cleanup.image_management.UrllibTransport", return_value=transport
+    ) as factory:
+        client = ImageManagementClient("session=secret")
+        assert client.all_digests("user", "app") == set()
+    factory.assert_called_once_with()
 
 
 def test_single_page_discovery_encodes_path_and_sends_session_headers() -> None:

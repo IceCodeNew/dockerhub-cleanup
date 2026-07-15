@@ -54,12 +54,15 @@ def parse_cutoff(value: str, now: datetime | None = None) -> datetime:
         if current.tzinfo is None:
             raise ValueError("the current time must include a timezone")
         amount = int(relative.group(1))
-        delta = {
-            "h": timedelta(hours=amount),
-            "d": timedelta(days=amount),
-            "w": timedelta(weeks=amount),
-        }[relative.group(2)]
-        return (current - delta).astimezone(UTC)
+        try:
+            delta = {
+                "h": timedelta(hours=amount),
+                "d": timedelta(days=amount),
+                "w": timedelta(weeks=amount),
+            }[relative.group(2)]
+            return (current - delta).astimezone(UTC)
+        except OverflowError as exc:
+            raise ValueError("relative cutoff is out of range") from exc
 
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
@@ -85,10 +88,11 @@ def select_stale_tags(
     if cutoff.tzinfo is None:
         raise ValueError("cutoff must include a timezone")
     cutoff = cutoff.astimezone(UTC)
+    protected_patterns = tuple(keep_patterns)
     candidates: list[Candidate] = []
 
     for tag in tags:
-        if is_protected(tag.name, keep_patterns):
+        if is_protected(tag.name, protected_patterns):
             continue
         if tag.last_pulled is not None and tag.last_pulled < cutoff:
             candidates.append(

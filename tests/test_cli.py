@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
@@ -90,12 +91,12 @@ def run_cli(
     prompt=lambda _message: "prompted-pat",
     factories: Factories | None = None,
 ) -> tuple[int, str, str, Factories]:
-    selected = factories or Factories()
+    selected = Factories() if factories is None else factories
     stdout = StringIO()
     stderr = StringIO()
     status = main(
         argv,
-        environ=environ or {},
+        environ={} if environ is None else environ,
         interactive=interactive,
         prompt=prompt,
         stdout=stdout,
@@ -108,7 +109,7 @@ def run_cli(
 
 
 def test_cutoff_argument_adapts_domain_error() -> None:
-    with pytest.raises(Exception, match="timezone"):
+    with pytest.raises(argparse.ArgumentTypeError, match="timezone"):
         cutoff_argument("2026-01-01")
 
 

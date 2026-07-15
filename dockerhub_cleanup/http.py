@@ -64,3 +64,5 @@ class UrllibTransport:
             raise CleanupError(f"{method} {url} failed with HTTP {exc.code}") from exc
         except urllib.error.URLError as exc:
             raise CleanupError(f"{method} {url} failed: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise CleanupError(f"{method} {url} timed out") from exc
