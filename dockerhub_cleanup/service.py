@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -117,6 +117,9 @@ class CleanupService:
         self,
         plan: CleanupPlan,
         manifest_deletion: ManifestDeletion | None = None,
+        *,
+        on_deleted: Callable[[Candidate], None] | None = None,
+        on_failure: Callable[[DeletionFailure], None] | None = None,
     ) -> ApplyResult:
         """Attempt every planned deletion and aggregate safe failures."""
 
@@ -140,9 +143,14 @@ class CleanupService:
                     candidate.reference,
                 )
             except CleanupError as exc:
-                failures.append(DeletionFailure(candidate, str(exc)))
+                failure = DeletionFailure(candidate, str(exc))
+                failures.append(failure)
+                if on_failure is not None:
+                    on_failure(failure)
             else:
                 deleted.append(candidate)
+                if on_deleted is not None:
+                    on_deleted(candidate)
 
         while pending_manifests:
             deferred: list[DeletionFailure] = []
@@ -158,14 +166,22 @@ class CleanupService:
                 except ReferencedManifestError as exc:
                     deferred.append(DeletionFailure(candidate, str(exc)))
                 except CleanupError as exc:
-                    failures.append(DeletionFailure(candidate, str(exc)))
+                    failure = DeletionFailure(candidate, str(exc))
+                    failures.append(failure)
+                    if on_failure is not None:
+                        on_failure(failure)
                 else:
                     deleted.append(candidate)
                     progress = True
+                    if on_deleted is not None:
+                        on_deleted(candidate)
             if not deferred:
                 break
             if not progress:
                 failures.extend(deferred)
+                if on_failure is not None:
+                    for failure in deferred:
+                        on_failure(failure)
                 break
             pending_manifests = [failure.candidate for failure in deferred]
         return ApplyResult(tuple(deleted), tuple(failures))

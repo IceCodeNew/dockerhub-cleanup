@@ -70,7 +70,8 @@ crane delete index.docker.io/{namespace}/{repository}@{digest}
 4. 对每个仓库收集 tag，并执行所选领域策略。
 5. 输出完整 dry-run 计划。
 6. apply 模式下先逐个删除 stale tag，再在单个临时 crane 会话中逐个删除无 tag digest。明确因其他 image 引用而失败的 manifest 会在同轮有删除进展时进入下一轮；没有进展时停止重试并报告失败。
-7. 汇总失败并以非零状态退出。
+7. service 在每个删除成功或失败最终确定时调用进度回调，CLI 立即 flush 对应输出。
+8. 汇总失败并以非零状态退出。
 
 任何发现阶段错误都会在删除开始前终止，确保不会使用部分候选清单执行变更。
 
