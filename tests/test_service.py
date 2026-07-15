@@ -76,6 +76,17 @@ def test_plan_lists_namespace_and_applies_protection() -> None:
     assert [candidate.reference for candidate in plan.candidates] == ["old"]
 
 
+def test_plan_reuses_one_shot_protection_patterns_across_repositories() -> None:
+    hub = FakeHub()
+    plan = CleanupService(hub).plan(
+        "user",
+        cutoff=CUTOFF,
+        keep_patterns=(pattern for pattern in ["*"]),
+    )
+
+    assert plan.candidates == ()
+
+
 def test_plan_combines_stale_and_untagged_without_duplicate_tag_fetches() -> None:
     hub = FakeHub()
     discovery = FakeDiscovery()

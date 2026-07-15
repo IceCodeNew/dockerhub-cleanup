@@ -89,6 +89,7 @@ class CleanupService:
         repository_names = (
             list(repositories) if repositories is not None else self._hub.repositories(namespace)
         )
+        protected_patterns = tuple(keep_patterns)
         candidates: list[Candidate] = []
         for repository in repository_names:
             tags = self._hub.tags(namespace, repository)
@@ -97,7 +98,7 @@ class CleanupService:
                     select_stale_tags(
                         tags,
                         cutoff,
-                        keep_patterns,
+                        protected_patterns,
                         include_never_pulled=include_never_pulled,
                     )
                 )

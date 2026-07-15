@@ -12,8 +12,6 @@ from dockerhub_cleanup.domain import (
     select_untagged_digests,
 )
 
-UTC = UTC
-
 
 def test_parse_api_timestamp_normalizes_offsets_and_missing_values() -> None:
     assert parse_api_timestamp(None) is None
@@ -50,6 +48,11 @@ def test_parse_cutoff_rejects_ambiguous_times(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         parse_cutoff(value, now)
+
+
+def test_parse_cutoff_rejects_out_of_range_duration() -> None:
+    with pytest.raises(ValueError, match="out of range"):
+        parse_cutoff("1000000000d", datetime(2026, 7, 15, tzinfo=UTC))
 
 
 def test_tag_protection_uses_case_sensitive_globs() -> None:
@@ -98,6 +101,23 @@ def test_select_stale_tags_normalizes_cutoff_and_metadata_offsets() -> None:
 def test_select_stale_tags_rejects_naive_cutoff() -> None:
     with pytest.raises(ValueError, match="cutoff"):
         select_stale_tags([], datetime(2026, 1, 1))
+
+
+def test_select_stale_tags_reuses_one_shot_protection_patterns() -> None:
+    old = datetime(2025, 1, 1, tzinfo=UTC)
+    tags = [
+        Tag("app", "prod-one", "sha256:a", old, old),
+        Tag("app", "prod-two", "sha256:b", old, old),
+    ]
+
+    assert (
+        select_stale_tags(
+            tags,
+            datetime(2026, 1, 1, tzinfo=UTC),
+            (pattern for pattern in ["prod-*"]),
+        )
+        == []
+    )
 
 
 def test_extract_digests_walks_nested_json_and_rejects_noncanonical_values() -> None:
