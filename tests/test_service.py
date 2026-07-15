@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from dockerhub_cleanup.domain import Candidate, Tag
-from dockerhub_cleanup.errors import CleanupError
+from dockerhub_cleanup.errors import CleanupError, ReferencedManifestError
 from dockerhub_cleanup.service import CleanupPlan, CleanupService
 
 OLD = datetime(2025, 1, 1, tzinfo=UTC)
@@ -193,6 +193,47 @@ def test_apply_continues_after_tag_and_manifest_failures() -> None:
     ]
     assert len(hub.delete_calls) == 2
     assert len(manifests.calls) == 2
+
+
+def test_apply_retries_referenced_manifests_after_dependency_progress() -> None:
+    class DependencyManifestDeletion(FakeManifestDeletion):
+        def delete_digest(self, namespace: str, repository: str, digest: str) -> None:
+            if digest == DIGEST_B:
+                self.errors.pop(DIGEST_A)
+            super().delete_digest(namespace, repository, digest)
+
+    hub = FakeHub()
+    manifests = DependencyManifestDeletion()
+    manifests.errors[DIGEST_A] = ReferencedManifestError("manifest referenced")
+    plan = CleanupPlan(
+        "user",
+        (
+            Candidate("untagged", "one", DIGEST_A, "reason"),
+            Candidate("untagged", "one", DIGEST_B, "reason"),
+        ),
+    )
+
+    result = CleanupService(hub).apply(plan, manifests)
+
+    assert [candidate.reference for candidate in result.deleted] == [DIGEST_B, DIGEST_A]
+    assert result.failures == ()
+    assert [call[2] for call in manifests.calls] == [DIGEST_A, DIGEST_B, DIGEST_A]
+
+
+def test_apply_reports_referenced_manifests_when_no_dependency_progress() -> None:
+    hub = FakeHub()
+    manifests = FakeManifestDeletion()
+    manifests.errors[DIGEST_A] = ReferencedManifestError("still referenced")
+    plan = CleanupPlan(
+        "user",
+        (Candidate("untagged", "one", DIGEST_A, "reason"),),
+    )
+
+    result = CleanupService(hub).apply(plan, manifests)
+
+    assert result.deleted == ()
+    assert [failure.message for failure in result.failures] == ["still referenced"]
+    assert len(manifests.calls) == 1
 
 
 def test_apply_accepts_an_empty_plan_without_manifest_client() -> None:

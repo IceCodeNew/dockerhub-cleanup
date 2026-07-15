@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, Self
 
-from dockerhub_cleanup.errors import CleanupError
+from dockerhub_cleanup.errors import CleanupError, ReferencedManifestError
 
 CRANE_TIMEOUT_SECONDS = 120.0
 DOCKER_HUB_SECRET_ENV = frozenset({"DH_COOKIE", "DH_PAT"})
@@ -148,7 +148,10 @@ class CraneClient:
             env=self._env,
         )
         if result.returncode:
-            raise CleanupError(f"crane delete {reference} failed: {result.stderr.strip()}")
+            message = f"crane delete {reference} failed: {result.stderr.strip()}"
+            if "cannot be deleted as it is referenced by other images" in result.stderr:
+                raise ReferencedManifestError(message)
+            raise CleanupError(message)
 
 
 def _redact(value: str, secret: str) -> str:

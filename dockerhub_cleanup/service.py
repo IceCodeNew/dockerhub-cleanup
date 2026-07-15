@@ -13,7 +13,7 @@ from dockerhub_cleanup.domain import (
     select_stale_tags,
     select_untagged_digests,
 )
-from dockerhub_cleanup.errors import CleanupError
+from dockerhub_cleanup.errors import CleanupError, ReferencedManifestError
 
 
 class HubRepository(Protocol):
@@ -128,23 +128,44 @@ class CleanupService:
 
         deleted: list[Candidate] = []
         failures: list[DeletionFailure] = []
+        pending_manifests: list[Candidate] = []
         for candidate in plan.candidates:
+            if candidate.kind == "untagged":
+                pending_manifests.append(candidate)
+                continue
             try:
-                if candidate.kind == "stale-tag":
-                    self._hub.delete_tag(
-                        plan.namespace,
-                        candidate.repository,
-                        candidate.reference,
-                    )
-                else:
-                    assert manifest_deletion is not None
+                self._hub.delete_tag(
+                    plan.namespace,
+                    candidate.repository,
+                    candidate.reference,
+                )
+            except CleanupError as exc:
+                failures.append(DeletionFailure(candidate, str(exc)))
+            else:
+                deleted.append(candidate)
+
+        while pending_manifests:
+            deferred: list[DeletionFailure] = []
+            progress = False
+            for candidate in pending_manifests:
+                assert manifest_deletion is not None
+                try:
                     manifest_deletion.delete_digest(
                         plan.namespace,
                         candidate.repository,
                         candidate.reference,
                     )
-            except CleanupError as exc:
-                failures.append(DeletionFailure(candidate, str(exc)))
-            else:
-                deleted.append(candidate)
+                except ReferencedManifestError as exc:
+                    deferred.append(DeletionFailure(candidate, str(exc)))
+                except CleanupError as exc:
+                    failures.append(DeletionFailure(candidate, str(exc)))
+                else:
+                    deleted.append(candidate)
+                    progress = True
+            if not deferred:
+                break
+            if not progress:
+                failures.extend(deferred)
+                break
+            pending_manifests = [failure.candidate for failure in deferred]
         return ApplyResult(tuple(deleted), tuple(failures))
