@@ -1,0 +1,16 @@
+[tools]
+crane = "0.21.7"
+python = "3.14"
+uv = "0.11.28"
+
+[tasks.test]
+description = "Run unit tests"
+run = "uv run --frozen pytest"
+
+[tasks.coverage]
+description = "Run branch coverage"
+run = "uv run --frozen pytest --cov=dockerhub_cleanup --cov-branch --cov-report=term-missing --cov-report=xml"
+
+[tasks.lint]
+description = "Run static checks"
+run = "uv run --frozen ruff check . && uv run --frozen ruff format --check ."
