@@ -9,10 +9,16 @@ from typing import Self
 
 import pytest
 
-from dockerhub_cleanup.cli import CraneOperations, cutoff_argument, main
-from dockerhub_cleanup.domain import Tag
+from dockerhub_cleanup.cli import (
+    CraneOperations,
+    _format_candidates,
+    _maximum_field_width,
+    cutoff_argument,
+    main,
+)
+from dockerhub_cleanup.domain import Candidate, Tag
 from dockerhub_cleanup.errors import CleanupError
-from dockerhub_cleanup.service import DigestDiscovery, HubRepository
+from dockerhub_cleanup.service import CleanupPlan, DigestDiscovery, HubRepository
 
 OLD = datetime(2025, 1, 1, tzinfo=UTC)
 DIGEST_A = "sha256:" + "a" * 64
@@ -201,6 +207,31 @@ def test_dry_run_prints_candidates_without_deleting() -> None:
     assert factories.hub_credentials == ("login", "pat")
     assert factories.hub.deleted == []
     assert factories.crane_credentials is None
+
+
+def test_candidate_output_preserves_minimum_kind_width() -> None:
+    plan = CleanupPlan(
+        "user",
+        (
+            Candidate("stale-tag", "app", "old", "stale"),
+            Candidate("untagged", "app", DIGEST_A, "unused"),
+        ),
+    )
+
+    assert tuple(_format_candidates(plan)) == (
+        "stale-tag  user/app:old  stale",
+        f"untagged   user/app@{DIGEST_A}  unused",
+    )
+
+
+def test_candidate_output_width_expands_for_longer_fields() -> None:
+    assert _maximum_field_width(("stale-tag", "archived-manifest"), minimum=10) == len(
+        "archived-manifest"
+    )
+
+
+def test_candidate_output_handles_empty_plan() -> None:
+    assert tuple(_format_candidates(CleanupPlan("user", ()))) == ()
 
 
 def test_empty_apply_plan_does_not_start_crane() -> None:
