@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
 
 from dockerhub_cleanup.domain import extract_digests
 from dockerhub_cleanup.errors import CleanupError
@@ -95,25 +95,32 @@ class ImageManagementClient:
 def _next_cursor(payload: object) -> str | None:
     if not isinstance(payload, list):
         raise CleanupError("Image Management returned an unexpected response")
-    for value in payload:
-        if not isinstance(value, dict):
+    for key_reference, cursor_reference in _mapping_items(payload):
+        if not _is_cursor_key_reference(key_reference, payload):
             continue
-        for key_reference, cursor_reference in value.items():
-            if not (
-                isinstance(key_reference, str)
-                and key_reference.startswith("_")
-                and key_reference[1:].isdigit()
-            ):
-                continue
-            key_index = int(key_reference[1:])
-            if key_index >= len(payload) or payload[key_index] != "lastEvaluatedKey":
-                continue
-            if type(cursor_reference) is int and cursor_reference == UNDEFINED_REFERENCE:
-                return None
-            if not (type(cursor_reference) is int and 0 <= cursor_reference < len(payload)):
-                raise CleanupError("Image Management returned an invalid pagination cursor")
-            cursor = payload[cursor_reference]
-            if not isinstance(cursor, str):
-                raise CleanupError("Image Management returned an invalid pagination cursor")
-            return cursor
+        if type(cursor_reference) is int and cursor_reference == UNDEFINED_REFERENCE:
+            return None
+        if not (type(cursor_reference) is int and 0 <= cursor_reference < len(payload)):
+            raise CleanupError("Image Management returned an invalid pagination cursor")
+        cursor = payload[cursor_reference]
+        if not isinstance(cursor, str):
+            raise CleanupError("Image Management returned an invalid pagination cursor")
+        return cursor
     return None
+
+
+def _mapping_items(payload: Sequence[object]) -> Iterator[tuple[object, object]]:
+    for value in payload:
+        if isinstance(value, dict):
+            yield from value.items()
+
+
+def _is_cursor_key_reference(key_reference: object, payload: Sequence[object]) -> bool:
+    if not (
+        isinstance(key_reference, str)
+        and key_reference.startswith("_")
+        and key_reference[1:].isdigit()
+    ):
+        return False
+    key_index = int(key_reference[1:])
+    return key_index < len(payload) and payload[key_index] == "lastEvaluatedKey"

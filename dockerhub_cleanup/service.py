@@ -101,10 +101,11 @@ class CleanupService:
 
         if cutoff is None and not include_untagged:
             raise CleanupError("select at least one cleanup policy")
-        if include_untagged and self._discovery is None:
-            raise CleanupError("untagged cleanup requires an Image Management client")
-        if include_untagged and self._reachability is None:
-            raise CleanupError("untagged cleanup requires manifest reachability inspection")
+        untagged_clients = (
+            _require_untagged_clients(self._discovery, self._reachability)
+            if include_untagged
+            else None
+        )
 
         repository_names = (
             list(repositories) if repositories is not None else self._hub.repositories(namespace)
@@ -122,12 +123,11 @@ class CleanupService:
                     include_never_pulled=include_never_pulled,
                 )
                 candidates.extend(stale_tags)
-            if include_untagged:
-                assert self._discovery is not None
-                assert self._reachability is not None
+            if untagged_clients is not None:
+                discovery, reachability = untagged_clients
                 stale_tag_names = {candidate.reference for candidate in stale_tags}
                 retained_roots = {tag.digest for tag in tags if tag.name not in stale_tag_names}
-                retained_digests = self._reachability.reachable_digests(
+                retained_digests = reachability.reachable_digests(
                     namespace,
                     repository,
                     retained_roots,
@@ -135,7 +135,7 @@ class CleanupService:
                 candidates.extend(
                     select_untagged_digests(
                         repository,
-                        self._discovery.all_digests(namespace, repository),
+                        discovery.all_digests(namespace, repository),
                         retained_digests,
                     )
                 )
@@ -183,10 +183,12 @@ class CleanupService:
                 if on_deleted is not None:
                     on_deleted(candidate)
 
+        if manifest_deletion is None:
+            return ApplyResult(tuple(deleted), tuple(failures))
+
         while pending_manifests:
             deferred: list[DeletionFailure] = []
             progress = False
-            assert manifest_deletion is not None
             with ThreadPoolExecutor(max_workers=manifest_workers) as executor:
                 attempts = {
                     executor.submit(
@@ -222,6 +224,17 @@ class CleanupService:
                 break
             pending_manifests = [failure.candidate for failure in deferred]
         return ApplyResult(tuple(deleted), tuple(failures))
+
+
+def _require_untagged_clients(
+    discovery: DigestDiscovery | None,
+    reachability: ManifestReachability | None,
+) -> tuple[DigestDiscovery, ManifestReachability]:
+    if discovery is None:
+        raise CleanupError("untagged cleanup requires an Image Management client")
+    if reachability is None:
+        raise CleanupError("untagged cleanup requires manifest reachability inspection")
+    return discovery, reachability
 
 
 def _delete_manifest(
