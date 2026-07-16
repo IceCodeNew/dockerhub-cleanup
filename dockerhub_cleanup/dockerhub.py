@@ -9,7 +9,7 @@ from datetime import datetime
 
 from dockerhub_cleanup.domain import Tag, parse_api_timestamp
 from dockerhub_cleanup.errors import CleanupError, HttpNotFoundError
-from dockerhub_cleanup.http import HttpTransport, UrllibTransport
+from dockerhub_cleanup.http import HttpResponse, HttpTransport, UrllibTransport
 
 HUB_API = "https://hub.docker.com"
 
@@ -61,6 +61,7 @@ class DockerHubClient:
         data: bytes | None = None,
     ) -> object:
         response = self._transport.request(method, url, headers=headers, data=data)
+        _require_success(response, method, url)
         try:
             return json.loads(response.body)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -69,6 +70,7 @@ class DockerHubClient:
     def _paginate(self, url: str) -> Iterator[dict[str, object]]:
         seen_urls: set[str] = set()
         previous_page_was_partial = False
+        page_size = _page_size(url)
         while url:
             if url in seen_urls:
                 raise CleanupError("Docker Hub pagination repeated a URL")
@@ -96,7 +98,6 @@ class DockerHubClient:
             next_url = payload.get("next")
             if next_url is not None and not isinstance(next_url, str):
                 raise CleanupError(f"unexpected pagination URL from {url}")
-            page_size = _page_size(url)
             previous_page_was_partial = page_size is not None and len(results) < page_size
             url = _trusted_hub_url(next_url) if next_url else ""
 
@@ -144,7 +145,13 @@ class DockerHubClient:
 
         parts = [urllib.parse.quote(value, safe="") for value in (namespace, repository, tag)]
         url = f"{HUB_API}/v2/namespaces/{parts[0]}/repositories/{parts[1]}/tags/{parts[2]}"
-        self._transport.request("DELETE", url, headers=self.auth_headers)
+        response = self._transport.request("DELETE", url, headers=self.auth_headers)
+        _require_success(response, "DELETE", url)
+
+
+def _require_success(response: HttpResponse, method: str, url: str) -> None:
+    if not 200 <= response.status < 300:
+        raise CleanupError(f"{method} {url} failed with HTTP {response.status}")
 
 
 def _optional_string(item: Mapping[str, object], key: str) -> str | None:

@@ -78,6 +78,14 @@ def test_authentication_rejects_missing_access_token(payload: object) -> None:
         DockerHubClient("user", "secret", transport=FakeTransport([response(payload)]))
 
 
+@pytest.mark.parametrize("status", [199, 300, 401])
+def test_authentication_rejects_non_success_status_without_response_body(status: int) -> None:
+    transport = FakeTransport([response({"secret": "response body"}, status=status)])
+    with pytest.raises(CleanupError, match=f"HTTP {status}") as raised:
+        DockerHubClient("user", "secret", transport=transport)
+    assert "response body" not in str(raised.value)
+
+
 def test_repositories_follow_pagination_and_encode_namespace() -> None:
     second_url = f"{HUB_API}/page/2"
     client, transport = client_with_responses(
@@ -151,6 +159,33 @@ def test_pagination_accepts_not_found_after_a_partial_page() -> None:
     )
 
     assert client.repositories("user") == ["one"]
+
+
+def test_pagination_remembers_page_size_when_next_url_omits_it() -> None:
+    second_url = f"{HUB_API}/v2/page/2"
+    stale_url = f"{HUB_API}/v2/page/3"
+    client, _ = client_with_responses(
+        response({"results": [{"name": "one"}, {"name": "two"}], "next": second_url}),
+        response({"results": [{"name": "three"}], "next": stale_url}),
+        HttpNotFoundError("missing final page"),
+    )
+
+    assert [item["name"] for item in client._paginate(f"{HUB_API}/v2/page/1?page_size=2")] == [
+        "one",
+        "two",
+        "three",
+    ]
+
+
+def test_pagination_rejects_not_found_without_a_known_page_size() -> None:
+    next_url = f"{HUB_API}/v2/page/2"
+    client, _ = client_with_responses(
+        response({"results": [{"name": "one"}], "next": next_url}),
+        HttpNotFoundError("missing next page"),
+    )
+
+    with pytest.raises(HttpNotFoundError, match="missing next page"):
+        list(client._paginate(f"{HUB_API}/v2/page/1"))
 
 
 def test_pagination_rejects_not_found_after_a_full_page() -> None:
@@ -230,6 +265,14 @@ def test_delete_tag_uses_encoded_hub_endpoint() -> None:
     assert url.endswith("/user%20name/repositories/app%2Fname/tags/release%2Ftest")
     assert headers == client.auth_headers
     assert data is None
+
+
+def test_delete_tag_rejects_non_success_transport_response() -> None:
+    client, _ = client_with_responses(HttpResponse(500, {}, b"secret response body"))
+
+    with pytest.raises(CleanupError, match="HTTP 500") as raised:
+        client.delete_tag("user", "app", "tag")
+    assert "secret response body" not in str(raised.value)
 
 
 def test_invalid_json_is_reported_without_response_body() -> None:

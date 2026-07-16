@@ -153,8 +153,14 @@ def test_delete_failure_reports_reference() -> None:
     assert "secret registry response" not in str(raised.value)
 
 
-def test_referenced_delete_failure_is_classified_for_dependency_retry() -> None:
-    message = "image cannot be deleted as it is referenced by other images"
+@pytest.mark.parametrize(
+    "message",
+    [
+        "image cannot be deleted as it is referenced by other images",
+        "manifest is REFERENCED BY an image index",
+    ],
+)
+def test_referenced_delete_failure_is_classified_for_dependency_retry(message: str) -> None:
     runner = FakeRunner([ok(), CommandResult(1, "", message)])
     with (
         CraneClient("user", "pat", runner=runner, command=("crane",)) as client,
