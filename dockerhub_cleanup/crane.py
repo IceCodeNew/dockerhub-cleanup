@@ -175,7 +175,7 @@ class CraneClient:
     ) -> set[str]:
         """Return retained roots and every manifest transitively referenced by an index."""
 
-        pending = list(dict.fromkeys(root_digests))
+        pending = list(root_digests)
         reachable = set(pending)
         inspected: set[str] = set()
         while pending:

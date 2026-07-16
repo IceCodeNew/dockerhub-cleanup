@@ -186,10 +186,10 @@ class CleanupService:
         if manifest_deletion is None:
             return ApplyResult(tuple(deleted), tuple(failures))
 
-        while pending_manifests:
-            deferred: list[DeletionFailure] = []
-            progress = False
-            with ThreadPoolExecutor(max_workers=manifest_workers) as executor:
+        with ThreadPoolExecutor(max_workers=manifest_workers) as executor:
+            while pending_manifests:
+                deferred: list[DeletionFailure] = []
+                progress = False
                 attempts = {
                     executor.submit(
                         _delete_manifest,
@@ -214,15 +214,15 @@ class CleanupService:
                         progress = True
                         if on_deleted is not None:
                             on_deleted(candidate)
-            if not deferred:
-                break
-            if not progress:
-                failures.extend(deferred)
-                if on_failure is not None:
-                    for failure in deferred:
-                        on_failure(failure)
-                break
-            pending_manifests = [failure.candidate for failure in deferred]
+                if not deferred:
+                    break
+                if not progress:
+                    failures.extend(deferred)
+                    if on_failure is not None:
+                        for failure in deferred:
+                            on_failure(failure)
+                    break
+                pending_manifests = [failure.candidate for failure in deferred]
         return ApplyResult(tuple(deleted), tuple(failures))
 
 
@@ -247,5 +247,7 @@ def _delete_manifest(
     except CleanupError as exc:
         return exc
     except Exception as exc:
-        return CleanupError(f"unexpected {type(exc).__name__} during manifest deletion")
+        error = CleanupError(f"unexpected {type(exc).__name__} during manifest deletion")
+        error.__cause__ = exc
+        return error
     return None
