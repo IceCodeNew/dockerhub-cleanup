@@ -67,6 +67,7 @@ class UrllibTransport:
             method=method,
             headers=dict(headers or {}),
         )
+        # Byte-backed request data can be replayed safely during bounded retries.
         attempt = 0
         while True:
             try:

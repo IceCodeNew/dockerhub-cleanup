@@ -1,12 +1,14 @@
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from threading import Barrier
+from unittest.mock import patch
 
 import pytest
 
 from dockerhub_cleanup.domain import Candidate, Tag
 from dockerhub_cleanup.errors import CleanupError, ReferencedManifestError
-from dockerhub_cleanup.service import CleanupPlan, CleanupService
+from dockerhub_cleanup.service import CleanupPlan, CleanupService, _delete_manifest
 
 OLD = datetime(2025, 1, 1, tzinfo=UTC)
 CUTOFF = datetime(2026, 1, 1, tzinfo=UTC)
@@ -338,11 +340,16 @@ def test_apply_retries_referenced_manifests_after_dependency_progress() -> None:
         ),
     )
 
-    result = CleanupService(hub).apply(plan, manifests)
+    with patch(
+        "dockerhub_cleanup.service.ThreadPoolExecutor",
+        wraps=ThreadPoolExecutor,
+    ) as executor:
+        result = CleanupService(hub).apply(plan, manifests)
 
     assert [candidate.reference for candidate in result.deleted] == [DIGEST_B, DIGEST_A]
     assert result.failures == ()
     assert [call[2] for call in manifests.calls] == [DIGEST_A, DIGEST_B, DIGEST_A]
+    executor.assert_called_once_with(max_workers=1)
 
 
 def test_apply_can_delete_independent_manifests_concurrently() -> None:
@@ -415,3 +422,19 @@ def test_apply_treats_unexpected_manifest_errors_as_safe_failures() -> None:
     assert result.deleted == ()
     assert len(result.failures) == 1
     assert "RuntimeError" in result.failures[0].message
+
+
+def test_unexpected_manifest_error_preserves_internal_cause() -> None:
+    class UnexpectedManifestDeletion(FakeManifestDeletion):
+        def delete_digest(self, namespace: str, repository: str, digest: str) -> None:
+            raise RuntimeError("secret response")
+
+    error = _delete_manifest(
+        UnexpectedManifestDeletion(),
+        "user",
+        Candidate("untagged", "one", DIGEST_A, "reason"),
+    )
+
+    assert isinstance(error, CleanupError)
+    assert isinstance(error.__cause__, RuntimeError)
+    assert "secret response" not in str(error)
