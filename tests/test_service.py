@@ -392,8 +392,11 @@ def test_apply_reports_referenced_manifests_when_no_dependency_progress() -> Non
     assert len(manifests.calls) == 1
 
 
-def test_apply_accepts_an_empty_plan_without_manifest_client() -> None:
-    assert CleanupService(FakeHub()).apply(CleanupPlan("user", ())).deleted == ()
+@pytest.mark.parametrize("manifest_deletion", [None, FakeManifestDeletion()])
+def test_apply_accepts_an_empty_plan(
+    manifest_deletion: FakeManifestDeletion | None,
+) -> None:
+    assert CleanupService(FakeHub()).apply(CleanupPlan("user", ()), manifest_deletion).deleted == ()
 
 
 def test_apply_treats_unexpected_manifest_errors_as_safe_failures() -> None:
