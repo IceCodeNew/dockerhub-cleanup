@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}")
 CandidateKind = Literal["stale-tag", "untagged"]
 
 
@@ -39,7 +39,7 @@ def parse_api_timestamp(value: str | None) -> datetime | None:
 
     if not value:
         return None
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
@@ -64,7 +64,7 @@ def parse_cutoff(value: str, now: datetime | None = None) -> datetime:
         except OverflowError as exc:
             raise ValueError("relative cutoff is out of range") from exc
 
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         raise ValueError("an absolute cutoff must include a timezone")
     return parsed.astimezone(UTC)
