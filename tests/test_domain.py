@@ -1,7 +1,8 @@
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 
 import pytest
 
+import dockerhub_cleanup.domain as domain
 from dockerhub_cleanup.domain import (
     Tag,
     extract_digests,
@@ -30,6 +31,20 @@ def test_parse_api_timestamp_normalizes_offsets_and_missing_values() -> None:
 )
 def test_parse_relative_cutoff(value: str, expected: datetime) -> None:
     assert parse_cutoff(value, datetime(2026, 7, 15, tzinfo=UTC)) == expected
+
+
+def test_parse_relative_cutoff_uses_current_utc_time_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> "FixedDatetime":
+            assert tz is UTC
+            return cls(2026, 7, 15, tzinfo=UTC)
+
+    monkeypatch.setattr(domain, "datetime", FixedDatetime)
+
+    assert parse_cutoff("24h") == datetime(2026, 7, 14, tzinfo=UTC)
 
 
 def test_parse_absolute_cutoff_normalizes_to_utc() -> None:
