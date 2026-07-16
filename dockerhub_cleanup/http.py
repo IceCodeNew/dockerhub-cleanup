@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import time
 import urllib.error
 import urllib.request
@@ -83,11 +84,13 @@ class UrllibTransport:
                     attempt += 1
                     continue
                 raise CleanupError(f"{method} {url} failed with HTTP {exc.code}") from exc
-            except (urllib.error.URLError, TimeoutError) as exc:
+            except (http.client.HTTPException, OSError) as exc:
                 if not self._can_retry(method, attempt):
                     if isinstance(exc, urllib.error.URLError):
                         raise CleanupError(f"{method} {url} failed: {exc.reason}") from exc
-                    raise CleanupError(f"{method} {url} timed out") from exc
+                    if isinstance(exc, TimeoutError):
+                        raise CleanupError(f"{method} {url} timed out") from exc
+                    raise CleanupError(f"{method} {url} failed: {type(exc).__name__}") from exc
                 self._wait_before_retry(attempt)
                 attempt += 1
 

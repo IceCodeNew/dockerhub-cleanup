@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -13,6 +14,12 @@ from dockerhub_cleanup.crane import (
     resolve_crane_command,
 )
 from dockerhub_cleanup.errors import CleanupError, ReferencedManifestError
+
+DIGEST_A = "sha256:" + "a" * 64
+DIGEST_B = "sha256:" + "b" * 64
+DIGEST_C = "sha256:" + "c" * 64
+OCI_INDEX = "application/vnd.oci.image.index.v1+json"
+OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 
 
 class FakeRunner:
@@ -154,6 +161,88 @@ def test_referenced_delete_failure_is_classified_for_dependency_retry() -> None:
         pytest.raises(ReferencedManifestError, match="referenced by other images"),
     ):
         client.delete_digest("user", "app", "sha256:abc")
+
+
+def test_reachable_digests_returns_empty_without_manifest_calls() -> None:
+    runner = FakeRunner([ok()])
+    with CraneClient("user", "pat", runner=runner, command=("crane",)) as client:
+        assert client.reachable_digests("user", "app", []) == set()
+    assert len(runner.calls) == 1
+
+
+def test_reachable_digests_traverses_nested_indexes_without_inspecting_leaves() -> None:
+    root = {
+        "manifests": [
+            {"digest": DIGEST_B, "mediaType": OCI_INDEX},
+            {"digest": DIGEST_C, "mediaType": OCI_MANIFEST},
+        ]
+    }
+    nested = {"manifests": [{"digest": DIGEST_A, "mediaType": OCI_INDEX}]}
+    runner = FakeRunner(
+        [
+            ok(),
+            CommandResult(0, json.dumps(root), ""),
+            CommandResult(0, json.dumps(nested), ""),
+        ]
+    )
+
+    with CraneClient("user", "pat", runner=runner, command=("crane",)) as client:
+        assert client.reachable_digests("user", "app", [DIGEST_A, DIGEST_A]) == {
+            DIGEST_A,
+            DIGEST_B,
+            DIGEST_C,
+        }
+
+    assert [call[0][1:] for call in runner.calls[1:]] == [
+        ["manifest", f"index.docker.io/user/app@{DIGEST_A}"],
+        ["manifest", f"index.docker.io/user/app@{DIGEST_B}"],
+    ]
+
+
+def test_reachable_digests_accepts_a_leaf_root() -> None:
+    runner = FakeRunner([ok(), CommandResult(0, '{"schemaVersion": 2}', "")])
+    with CraneClient("user", "pat", runner=runner, command=("crane",)) as client:
+        assert client.reachable_digests("user", "app", [DIGEST_A]) == {DIGEST_A}
+
+
+def test_manifest_inspection_failure_does_not_expose_response_body() -> None:
+    runner = FakeRunner([ok(), CommandResult(1, "", "secret registry response")])
+    with (
+        CraneClient("user", "pat", runner=runner, command=("crane",)) as client,
+        pytest.raises(CleanupError, match="crane manifest") as raised,
+    ):
+        client.reachable_digests("user", "app", [DIGEST_A])
+    assert "secret registry response" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ("not-json", "invalid JSON"),
+        ("[]", "invalid object"),
+        ('{"manifests": null}', "invalid descriptors"),
+        ('{"manifests": [null]}', "invalid descriptors"),
+        (
+            json.dumps({"manifests": [{"digest": None, "mediaType": OCI_MANIFEST}]}),
+            "invalid digest",
+        ),
+        (
+            json.dumps({"manifests": [{"digest": "bad", "mediaType": OCI_MANIFEST}]}),
+            "invalid digest",
+        ),
+        (
+            json.dumps({"manifests": [{"digest": DIGEST_B, "mediaType": "unknown"}]}),
+            "unknown media type",
+        ),
+    ],
+)
+def test_reachable_digests_rejects_malformed_manifests(payload: str, message: str) -> None:
+    runner = FakeRunner([ok(), CommandResult(0, payload, "")])
+    with (
+        CraneClient("user", "pat", runner=runner, command=("crane",)) as client,
+        pytest.raises(CleanupError, match=message),
+    ):
+        client.reachable_digests("user", "app", [DIGEST_A])
 
 
 def test_subprocess_runner_captures_result() -> None:

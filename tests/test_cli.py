@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from io import StringIO
@@ -9,10 +9,10 @@ from typing import Self
 
 import pytest
 
-from dockerhub_cleanup.cli import cutoff_argument, main
+from dockerhub_cleanup.cli import CraneOperations, cutoff_argument, main
 from dockerhub_cleanup.domain import Tag
 from dockerhub_cleanup.errors import CleanupError
-from dockerhub_cleanup.service import DigestDiscovery, HubRepository, ManifestDeletion
+from dockerhub_cleanup.service import DigestDiscovery, HubRepository
 
 OLD = datetime(2025, 1, 1, tzinfo=UTC)
 DIGEST_A = "sha256:" + "a" * 64
@@ -42,10 +42,12 @@ class FakeDiscovery:
         return {DIGEST_A, DIGEST_B}
 
 
-class FakeCrane(AbstractContextManager[ManifestDeletion]):
+class FakeCrane(AbstractContextManager[CraneOperations]):
     def __init__(self) -> None:
         self.deleted: list[str] = []
         self.delete_errors: dict[str, CleanupError] = {}
+        self.reachable_children: set[str] = set()
+        self.reachability_calls: list[tuple[str, str, set[str]]] = []
         self.entered = False
 
     def __enter__(self) -> Self:
@@ -59,6 +61,16 @@ class FakeCrane(AbstractContextManager[ManifestDeletion]):
         self.deleted.append(digest)
         if error := self.delete_errors.get(digest):
             raise error
+
+    def reachable_digests(
+        self,
+        namespace: str,
+        repository: str,
+        root_digests: Iterable[str],
+    ) -> set[str]:
+        roots = set(root_digests)
+        self.reachability_calls.append((namespace, repository, roots))
+        return roots | self.reachable_children
 
 
 class Factories:
@@ -78,7 +90,7 @@ class Factories:
         self.discovery_cookie = cookie
         return self.discovery
 
-    def crane_factory(self, username: str, pat: str) -> AbstractContextManager[ManifestDeletion]:
+    def crane_factory(self, username: str, pat: str) -> AbstractContextManager[CraneOperations]:
         self.crane_credentials = (username, pat)
         return self.crane
 
@@ -251,6 +263,25 @@ def test_apply_untagged_uses_cookie_and_crane() -> None:
     assert factories.discovery_cookie == "session=cookie"
     assert factories.crane_credentials == ("user", "pat")
     assert factories.crane.deleted == [DIGEST_B]
+    assert factories.crane.reachability_calls == [("user", "app", {DIGEST_A})]
+    assert not factories.crane.entered
+
+
+def test_untagged_dry_run_excludes_manifests_reachable_from_retained_tags() -> None:
+    factories = Factories()
+    factories.crane.reachable_children.add(DIGEST_B)
+
+    status, stdout, stderr, factories = run_cli(
+        ["--namespace", "user", "--untagged"],
+        environ={"DH_PAT": "pat", "DH_COOKIE": "session=cookie"},
+        factories=factories,
+    )
+
+    assert status == 0
+    assert "DRY-RUN: 0 candidate(s)" in stdout
+    assert stderr == ""
+    assert factories.crane_credentials == ("user", "pat")
+    assert factories.crane.deleted == []
     assert not factories.crane.entered
 
 

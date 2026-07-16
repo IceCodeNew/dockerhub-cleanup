@@ -2,18 +2,32 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, Self
 
+from dockerhub_cleanup.domain import SHA256_RE
 from dockerhub_cleanup.errors import CleanupError, ReferencedManifestError
 
 CRANE_TIMEOUT_SECONDS = 120.0
 DOCKER_HUB_SECRET_ENV = frozenset({"DH_COOKIE", "DH_PAT"})
+INDEX_MEDIA_TYPES = frozenset(
+    {
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+        "application/vnd.oci.image.index.v1+json",
+    }
+)
+LEAF_MEDIA_TYPES = frozenset(
+    {
+        "application/vnd.docker.distribution.manifest.v2+json",
+        "application/vnd.oci.image.manifest.v1+json",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -152,6 +166,71 @@ class CraneClient:
             if "cannot be deleted as it is referenced by other images" in result.stderr:
                 raise ReferencedManifestError(f"{message}: manifest is referenced by other images")
             raise CleanupError(message)
+
+    def reachable_digests(
+        self,
+        namespace: str,
+        repository: str,
+        root_digests: Iterable[str],
+    ) -> set[str]:
+        """Return retained roots and every manifest transitively referenced by an index."""
+
+        pending = list(dict.fromkeys(root_digests))
+        reachable = set(pending)
+        inspected: set[str] = set()
+        while pending:
+            digest = pending.pop()
+            if digest in inspected:
+                continue
+            inspected.add(digest)
+            for child_digest, media_type in self._manifest_children(
+                namespace,
+                repository,
+                digest,
+            ):
+                reachable.add(child_digest)
+                if media_type in INDEX_MEDIA_TYPES:
+                    pending.append(child_digest)
+        return reachable
+
+    def _manifest_children(
+        self,
+        namespace: str,
+        repository: str,
+        digest: str,
+    ) -> list[tuple[str, str]]:
+        reference = f"index.docker.io/{namespace}/{repository}@{digest}"
+        result = self._runner.run(
+            [*self._command, "manifest", reference],
+            input_text=None,
+            env=self._env,
+        )
+        if result.returncode:
+            raise CleanupError(f"crane manifest {reference} failed")
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise CleanupError(f"crane manifest {reference} returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise CleanupError(f"crane manifest {reference} returned an invalid object")
+        if "manifests" not in payload:
+            return []
+        descriptors = payload["manifests"]
+        if not isinstance(descriptors, list):
+            raise CleanupError(f"crane manifest {reference} returned invalid descriptors")
+
+        children: list[tuple[str, str]] = []
+        for descriptor in descriptors:
+            if not isinstance(descriptor, dict):
+                raise CleanupError(f"crane manifest {reference} returned invalid descriptors")
+            child_digest = descriptor.get("digest")
+            media_type = descriptor.get("mediaType")
+            if not isinstance(child_digest, str) or not SHA256_RE.fullmatch(child_digest):
+                raise CleanupError(f"crane manifest {reference} returned an invalid digest")
+            if media_type not in INDEX_MEDIA_TYPES | LEAF_MEDIA_TYPES:
+                raise CleanupError(f"crane manifest {reference} returned an unknown media type")
+            children.append((child_digest, media_type))
+        return children
 
 
 def _redact(value: str, secret: str) -> str:

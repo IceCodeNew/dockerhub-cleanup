@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from threading import Barrier
 
@@ -48,6 +49,22 @@ class FakeDiscovery:
         return {DIGEST_A, DIGEST_B}
 
 
+class FakeReachability:
+    def __init__(self, children: set[str] | None = None) -> None:
+        self.children = set() if children is None else children
+        self.calls: list[tuple[str, str, set[str]]] = []
+
+    def reachable_digests(
+        self,
+        namespace: str,
+        repository: str,
+        root_digests: Iterable[str],
+    ) -> set[str]:
+        roots = set(root_digests)
+        self.calls.append((namespace, repository, roots))
+        return roots | self.children
+
+
 class FakeManifestDeletion:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str]] = []
@@ -91,7 +108,8 @@ def test_plan_reuses_one_shot_protection_patterns_across_repositories() -> None:
 def test_plan_combines_stale_and_untagged_without_duplicate_tag_fetches() -> None:
     hub = FakeHub()
     discovery = FakeDiscovery()
-    plan = CleanupService(hub, discovery).plan(
+    reachability = FakeReachability()
+    plan = CleanupService(hub, discovery, reachability).plan(
         "user",
         repositories=["one"],
         cutoff=CUTOFF,
@@ -100,6 +118,7 @@ def test_plan_combines_stale_and_untagged_without_duplicate_tag_fetches() -> Non
 
     assert hub.tag_calls == [("user", "one")]
     assert discovery.calls == [("user", "one")]
+    assert reachability.calls == [("user", "one", set())]
     assert [(candidate.kind, candidate.reference) for candidate in plan.candidates] == [
         ("stale-tag", "old"),
         ("untagged", DIGEST_A),
@@ -111,7 +130,8 @@ def test_plan_keeps_digest_referenced_by_a_retained_tag() -> None:
     hub = FakeHub()
     hub.tags_by_repository["one"].append(Tag("one", "current", DIGEST_A, CUTOFF, CUTOFF))
 
-    plan = CleanupService(hub, FakeDiscovery()).plan(
+    reachability = FakeReachability()
+    plan = CleanupService(hub, FakeDiscovery(), reachability).plan(
         "user",
         repositories=["one"],
         cutoff=CUTOFF,
@@ -122,11 +142,32 @@ def test_plan_keeps_digest_referenced_by_a_retained_tag() -> None:
         ("stale-tag", "old"),
         ("untagged", DIGEST_B),
     ]
+    assert reachability.calls == [("user", "one", {DIGEST_A})]
+
+
+def test_plan_keeps_manifest_reachable_from_a_retained_tag() -> None:
+    hub = FakeHub()
+    hub.tags_by_repository["one"].append(Tag("one", "current", DIGEST_A, CUTOFF, CUTOFF))
+
+    plan = CleanupService(
+        hub,
+        FakeDiscovery(),
+        FakeReachability({DIGEST_B}),
+    ).plan(
+        "user",
+        repositories=["one"],
+        cutoff=CUTOFF,
+        include_untagged=True,
+    )
+
+    assert [(candidate.kind, candidate.reference) for candidate in plan.candidates] == [
+        ("stale-tag", "old")
+    ]
 
 
 def test_plan_supports_untagged_only_policy() -> None:
     hub = FakeHub()
-    plan = CleanupService(hub, FakeDiscovery()).plan(
+    plan = CleanupService(hub, FakeDiscovery(), FakeReachability()).plan(
         "user", repositories=["one"], include_untagged=True
     )
     assert [(candidate.kind, candidate.reference) for candidate in plan.candidates] == [
@@ -152,6 +193,8 @@ def test_plan_requires_a_policy_and_discovery_adapter() -> None:
         service.plan("user")
     with pytest.raises(CleanupError, match="Image Management"):
         service.plan("user", include_untagged=True)
+    with pytest.raises(CleanupError, match="reachability"):
+        CleanupService(FakeHub(), FakeDiscovery()).plan("user", include_untagged=True)
 
 
 def test_apply_dispatches_each_candidate() -> None:
