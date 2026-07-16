@@ -1,4 +1,5 @@
 import json
+import time
 import urllib.error
 from collections.abc import Mapping
 from email.message import Message
@@ -9,12 +10,12 @@ import pytest
 
 import dockerhub_cleanup.dockerhub as dockerhub_module
 from dockerhub_cleanup.dockerhub import HUB_API, DockerHubClient
-from dockerhub_cleanup.errors import CleanupError
+from dockerhub_cleanup.errors import CleanupError, HttpNotFoundError
 from dockerhub_cleanup.http import HttpResponse, UrllibTransport
 
 
 class FakeTransport:
-    def __init__(self, responses: list[HttpResponse]):
+    def __init__(self, responses: list[HttpResponse | Exception]):
         self.responses = responses
         self.requests: list[tuple[str, str, Mapping[str, str] | None, bytes | None]] = []
 
@@ -27,7 +28,10 @@ class FakeTransport:
         data: bytes | None = None,
     ) -> HttpResponse:
         self.requests.append((method, url, headers, data))
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
     def __bool__(self) -> bool:
         return False
@@ -37,7 +41,9 @@ def response(payload: object, *, status: int = 200) -> HttpResponse:
     return HttpResponse(status=status, headers={}, body=json.dumps(payload).encode())
 
 
-def client_with_responses(*responses: HttpResponse) -> tuple[DockerHubClient, FakeTransport]:
+def client_with_responses(
+    *responses: HttpResponse | Exception,
+) -> tuple[DockerHubClient, FakeTransport]:
     transport = FakeTransport([response({"access_token": "jwt"}), *responses])
     return DockerHubClient("user", "secret", transport=transport), transport
 
@@ -46,7 +52,10 @@ def test_client_creates_default_transport() -> None:
     transport = FakeTransport([response({"access_token": "jwt"})])
     with patch("dockerhub_cleanup.dockerhub.UrllibTransport", return_value=transport) as factory:
         DockerHubClient("user", "secret")
-    factory.assert_called_once_with()
+    factory.assert_called_once_with(
+        retries=2,
+        retry_methods=frozenset({"GET", "POST"}),
+    )
 
 
 def test_authentication_sends_credentials_only_in_request_body() -> None:
@@ -132,6 +141,27 @@ def test_repositories_accept_relative_hub_pagination() -> None:
 
     assert client.repositories("user") == ["one", "two"]
     assert transport.requests[2][1] == f"{HUB_API}/v2/page/2"
+
+
+def test_pagination_accepts_not_found_after_a_partial_page() -> None:
+    next_url = f"{HUB_API}/v2/page/2?page_size=100"
+    client, _ = client_with_responses(
+        response({"results": [{"name": "one"}], "next": next_url}),
+        HttpNotFoundError("missing final page"),
+    )
+
+    assert client.repositories("user") == ["one"]
+
+
+def test_pagination_rejects_not_found_after_a_full_page() -> None:
+    next_url = f"{HUB_API}/v2/page/2?page_size=1"
+    client, _ = client_with_responses(
+        response({"results": [{"name": "one"}], "next": next_url}),
+        HttpNotFoundError("missing next page"),
+    )
+
+    with pytest.raises(HttpNotFoundError, match="missing next page"):
+        list(client._paginate(f"{HUB_API}/v2/page/1?page_size=1"))
 
 
 def test_pagination_trust_origin_follows_hub_api(
@@ -241,6 +271,19 @@ def test_urllib_transport_sanitizes_http_errors() -> None:
     assert "secret response" not in str(raised.value)
 
 
+def test_urllib_transport_classifies_not_found_errors() -> None:
+    headers = Message()
+    error = urllib.error.HTTPError(
+        "https://example.test", 404, "not found", headers, BytesIO(b"secret response")
+    )
+    with (
+        patch("urllib.request.urlopen", side_effect=error),
+        pytest.raises(HttpNotFoundError, match="HTTP 404") as raised,
+    ):
+        UrllibTransport().request("GET", "https://example.test")
+    assert "secret response" not in str(raised.value)
+
+
 def test_urllib_transport_reports_network_errors() -> None:
     with (
         patch("urllib.request.urlopen", side_effect=urllib.error.URLError("offline")),
@@ -255,3 +298,61 @@ def test_urllib_transport_reports_timeouts() -> None:
         pytest.raises(CleanupError, match="timed out"),
     ):
         UrllibTransport().request("GET", "https://example.test")
+
+
+def test_urllib_transport_retries_transient_errors_with_backoff() -> None:
+    raw_response = MagicMock()
+    raw_response.__enter__.return_value = raw_response
+    raw_response.status = 200
+    raw_response.headers.items.return_value = []
+    raw_response.read.return_value = b"{}"
+
+    with (
+        patch(
+            "urllib.request.urlopen",
+            side_effect=[urllib.error.URLError("offline"), TimeoutError, raw_response],
+        ) as urlopen,
+        patch.object(time, "sleep") as sleep,
+    ):
+        result = UrllibTransport(retries=2, retry_delay=0.25).request("GET", "https://example.test")
+
+    assert result == HttpResponse(200, {}, b"{}")
+    assert urlopen.call_count == 3
+    assert [call.args[0] for call in sleep.call_args_list] == [0.25, 0.5]
+
+
+@pytest.mark.parametrize(("status", "retry_after", "delay"), [(429, "60", 30.0), (503, None, 0.5)])
+def test_urllib_transport_retries_transient_http_errors(
+    status: int, retry_after: str | None, delay: float
+) -> None:
+    raw_response = MagicMock()
+    raw_response.__enter__.return_value = raw_response
+    raw_response.status = 200
+    raw_response.headers.items.return_value = []
+    raw_response.read.return_value = b"{}"
+    headers = Message()
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
+    error = urllib.error.HTTPError("https://example.test", status, "retry", headers, None)
+
+    with (
+        patch("urllib.request.urlopen", side_effect=[error, raw_response]) as urlopen,
+        patch.object(time, "sleep") as sleep,
+    ):
+        result = UrllibTransport(retries=1).request("GET", "https://example.test")
+
+    assert result == HttpResponse(200, {}, b"{}")
+    assert urlopen.call_count == 2
+    sleep.assert_called_once_with(delay)
+
+
+def test_urllib_transport_does_not_retry_delete_network_errors() -> None:
+    with (
+        patch("urllib.request.urlopen", side_effect=urllib.error.URLError("offline")) as urlopen,
+        patch.object(time, "sleep") as sleep,
+        pytest.raises(CleanupError, match="offline"),
+    ):
+        UrllibTransport(retries=2).request("DELETE", "https://example.test")
+
+    urlopen.assert_called_once()
+    sleep.assert_not_called()

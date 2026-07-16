@@ -18,6 +18,7 @@ from dockerhub_cleanup.errors import CleanupError
 from dockerhub_cleanup.image_management import ImageManagementClient
 from dockerhub_cleanup.service import (
     CleanupService,
+    DeletionFailure,
     DigestDiscovery,
     HubRepository,
     ManifestDeletion,
@@ -26,6 +27,7 @@ from dockerhub_cleanup.service import (
 HubFactory = Callable[[str, str], HubRepository]
 DiscoveryFactory = Callable[[str], DigestDiscovery]
 CraneFactory = Callable[[str, str], AbstractContextManager[ManifestDeletion]]
+MANIFEST_DELETE_WORKERS = 4
 
 
 def cutoff_argument(value: str) -> datetime:
@@ -154,26 +156,42 @@ def _run(
         keep_patterns=args.keep_tag,
     )
     mode = "APPLY" if args.apply else "DRY-RUN"
-    print(f"{mode}: {len(plan.candidates)} candidate(s) in {plan.namespace}", file=stdout)
+    print(
+        f"{mode}: {len(plan.candidates)} candidate(s) in {plan.namespace}",
+        file=stdout,
+        flush=True,
+    )
     for candidate in plan.candidates:
-        print(_format_candidate(plan.namespace, candidate), file=stdout)
+        print(_format_candidate(plan.namespace, candidate), file=stdout, flush=True)
 
     if not args.apply or not plan.candidates:
         return 0
 
-    has_untagged = any(candidate.kind == "untagged" for candidate in plan.candidates)
-    if has_untagged:
-        with crane_factory(username, pat) as crane:
-            result = service.apply(plan, crane)
-    else:
-        result = service.apply(plan)
+    def report_deleted(candidate: Candidate) -> None:
+        print(f"deleted {_reference(plan.namespace, candidate)}", file=stdout, flush=True)
 
-    for candidate in result.deleted:
-        print(f"deleted {_reference(plan.namespace, candidate)}", file=stdout)
-    for failure in result.failures:
+    def report_failure(failure: DeletionFailure) -> None:
         print(
             f"ERROR: {_reference(plan.namespace, failure.candidate)}: {failure.message}",
             file=stderr,
+            flush=True,
+        )
+
+    has_untagged = any(candidate.kind == "untagged" for candidate in plan.candidates)
+    if has_untagged:
+        with crane_factory(username, pat) as crane:
+            result = service.apply(
+                plan,
+                crane,
+                on_deleted=report_deleted,
+                on_failure=report_failure,
+                manifest_workers=MANIFEST_DELETE_WORKERS,
+            )
+    else:
+        result = service.apply(
+            plan,
+            on_deleted=report_deleted,
+            on_failure=report_failure,
         )
     return 1 if result.failures else 0
 

@@ -144,7 +144,7 @@ def select_untagged_digests(
     all_digests: Iterable[str],
     tagged_digests: Iterable[str],
 ) -> list[Candidate]:
-    """Select digests that are absent from the current tag references."""
+    """Select digests that are absent from retained tag references."""
 
     untagged = set(all_digests) - set(tagged_digests)
     return [
@@ -152,7 +152,7 @@ def select_untagged_digests(
             kind="untagged",
             repository=repository,
             reference=digest,
-            reason="not referenced by a current tag",
+            reason="not referenced by a retained tag",
         )
         for digest in sorted(untagged)
     ]

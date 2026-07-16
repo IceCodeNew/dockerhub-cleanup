@@ -8,7 +8,7 @@ from collections.abc import Iterator, Mapping
 from datetime import datetime
 
 from dockerhub_cleanup.domain import Tag, parse_api_timestamp
-from dockerhub_cleanup.errors import CleanupError
+from dockerhub_cleanup.errors import CleanupError, HttpNotFoundError
 from dockerhub_cleanup.http import HttpTransport, UrllibTransport
 
 HUB_API = "https://hub.docker.com"
@@ -24,7 +24,11 @@ class DockerHubClient:
         *,
         transport: HttpTransport | None = None,
     ):
-        self._transport = UrllibTransport() if transport is None else transport
+        self._transport = (
+            UrllibTransport(retries=2, retry_methods=frozenset({"GET", "POST"}))
+            if transport is None
+            else transport
+        )
         self._token = self._authenticate(username, pat)
 
     @property
@@ -64,11 +68,17 @@ class DockerHubClient:
 
     def _paginate(self, url: str) -> Iterator[dict[str, object]]:
         seen_urls: set[str] = set()
+        previous_page_was_partial = False
         while url:
             if url in seen_urls:
                 raise CleanupError("Docker Hub pagination repeated a URL")
             seen_urls.add(url)
-            payload = self._json_request("GET", url, headers=self.auth_headers)
+            try:
+                payload = self._json_request("GET", url, headers=self.auth_headers)
+            except HttpNotFoundError:
+                if previous_page_was_partial:
+                    return
+                raise
             if not isinstance(payload, dict):
                 raise CleanupError(f"unexpected paginated response from {url}")
             results = payload.get("results")
@@ -86,6 +96,8 @@ class DockerHubClient:
             next_url = payload.get("next")
             if next_url is not None and not isinstance(next_url, str):
                 raise CleanupError(f"unexpected pagination URL from {url}")
+            page_size = _page_size(url)
+            previous_page_was_partial = page_size is not None and len(results) < page_size
             url = _trusted_hub_url(next_url) if next_url else ""
 
     def repositories(self, namespace: str) -> list[str]:
@@ -159,3 +171,10 @@ def _trusted_hub_url(url: str) -> str:
     ):
         raise CleanupError("Docker Hub pagination returned an untrusted URL")
     return resolved
+
+
+def _page_size(url: str) -> int | None:
+    values = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get("page_size")
+    if not values or not values[0].isdigit():
+        return None
+    return int(values[0])

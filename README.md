@@ -97,9 +97,11 @@ dockerhub-cleanup \
   --confirm your-docker-id
 ```
 
-长期未拉取的 tag 通过 Docker Hub tag API 删除，不会直接删除可能被其他 tag 共享的 manifest。无 tag digest 通过 `crane delete` 删除；仍被 image index、tag 或其他对象引用时，Docker Hub 会拒绝操作。
+长期未拉取的 tag 通过 Docker Hub tag API 删除，不会直接删除可能被其他 tag 共享的 manifest。同时启用 `--before` 和 `--untagged` 时，计划会先排除待删除 tag 的引用，因此仅由这些 tag 引用的 manifest 也会在同一次 dry-run 中列为无 tag 候选。无 tag digest 通过 `crane delete` 删除；仍被 image index、保留的 tag 或其他对象引用时，Docker Hub 会拒绝操作。
 
 一个候选项失败不会阻止后续候选项。只要存在失败，命令最终返回非零状态。
+每个删除成功或最终失败的结果都会立即输出，便于观察长时间运行的清理任务。
+无 tag manifest 在同一依赖轮次内最多并发执行 4 个删除；引用冲突会延后到下一轮。
 
 ## 安全使用
 

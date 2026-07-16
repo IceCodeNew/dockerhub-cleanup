@@ -20,10 +20,10 @@
 
 ### 无 tag manifest
 
-1. 无 tag manifest 定义为 Docker Hub Image Management 返回的全部 manifest digest 与当前 tag 引用 digest 的差集。
+1. 无 tag manifest 定义为 Docker Hub Image Management 返回的全部 manifest digest 与计划保留的 tag 引用 digest 的差集。同时启用 stale tag 和无 tag 策略时，仅由待删除 tag 引用的 manifest 必须在同一删除计划中成为无 tag 候选。
 2. `crane ls` 只能列出 `/tags/list` 返回的 tag，包括名称形似 digest 的 tag，不能用于枚举无 tag manifest。
 3. Docker Hub 当前没有使用 PAT 枚举全部 manifest 的公开 API。工具必须把浏览器会话 Cookie 限定在 Image Management 发现流程中；删除仍使用 PAT 派生的 Registry 凭据。
-4. 已知 digest 通过 `crane delete` 删除。被 image index、tag 或其他对象引用的 manifest 由 Docker Hub 拒绝删除，工具不得绕过引用保护。
+4. 已知 digest 通过 `crane delete` 删除。被 image index、tag 或其他对象引用的 manifest 由 Docker Hub 拒绝删除，工具不得绕过引用保护。同一计划中其他 manifest 删除后，工具可以对明确的引用冲突执行有界重试。
 5. Image Management 属于未公开的网页接口。响应格式、分页游标或认证方式不符合预期时，工具必须安全失败，不得根据不完整清单执行删除。
 
 ## 安全与认证
@@ -35,6 +35,8 @@
 5. 调用 `crane` 时使用临时 `DOCKER_CONFIG`，运行结束后删除，不能修改用户现有 Docker 登录配置。
 6. 日志和异常不能输出 PAT、JWT、Cookie 或临时认证文件内容。
 7. 一个候选项删除失败不能阻止后续候选项继续处理；命令最终以非零状态报告部分失败。
+8. apply 模式必须逐项实时输出删除成功和最终失败结果，不能等待整个计划结束后再集中输出。
+9. 无 tag manifest 删除可以在单个隔离认证会话内有界并发；依赖冲突仍必须分轮处理，且并发不得扩大到 tag 删除。
 
 ## CLI
 

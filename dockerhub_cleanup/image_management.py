@@ -11,6 +11,8 @@ from dockerhub_cleanup.errors import CleanupError
 from dockerhub_cleanup.http import HttpTransport, UrllibTransport
 
 IMAGE_MANAGEMENT = "https://hub.docker.com/repository/docker"
+USER_AGENT = "dockerhub-cleanup/0.1"
+UNDEFINED_REFERENCE = -5
 
 
 class ImageManagementClient:
@@ -27,7 +29,11 @@ class ImageManagementClient:
                 "untagged discovery needs DH_COOKIE from an authenticated Docker Hub session"
             )
         self._cookie = cookie
-        self._transport = UrllibTransport() if transport is None else transport
+        self._transport = (
+            UrllibTransport(retries=2, retry_methods=frozenset({"GET", "POST"}))
+            if transport is None
+            else transport
+        )
 
     @property
     def headers(self) -> Mapping[str, str]:
@@ -37,6 +43,7 @@ class ImageManagementClient:
             "Cookie": self._cookie,
             "X-Requested-With": "XMLHttpRequest",
             "Accept": "application/json",
+            "User-Agent": USER_AGENT,
         }
 
     def all_digests(self, namespace: str, repository: str) -> set[str]:
@@ -44,11 +51,10 @@ class ImageManagementClient:
 
         encoded_namespace = urllib.parse.quote(namespace, safe="")
         encoded_repository = urllib.parse.quote(repository, safe="")
-        url = (
-            f"{IMAGE_MANAGEMENT}/{encoded_namespace}/{encoded_repository}/image-management.data"
-            "?sortField=last_pushed&sortOrder=asc"
-        )
-        payload = self._request_json("GET", url, headers=self.headers)
+        repository_url = f"{IMAGE_MANAGEMENT}/{encoded_namespace}/{encoded_repository}"
+        url = f"{repository_url}/image-management.data?sortField=last_pushed&sortOrder=asc"
+        headers = {**self.headers, "Referer": f"{repository_url}/tags"}
+        payload = self._request_json("GET", url, headers=headers)
         digests = extract_digests(payload)
         seen_cursors: set[str] = set()
 
@@ -63,7 +69,7 @@ class ImageManagementClient:
                 "POST",
                 url,
                 headers={
-                    **self.headers,
+                    **headers,
                     "Content-Type": "application/x-www-form-urlencoded",
                 },
                 data=data,
@@ -89,13 +95,25 @@ class ImageManagementClient:
 def _next_cursor(payload: object) -> str | None:
     if not isinstance(payload, list):
         raise CleanupError("Image Management returned an unexpected response")
-    for index, value in enumerate(payload):
-        if value != "lastEvaluatedKey":
+    for value in payload:
+        if not isinstance(value, dict):
             continue
-        if index + 1 >= len(payload):
-            raise CleanupError("Image Management returned an invalid pagination cursor")
-        cursor = payload[index + 1]
-        if not isinstance(cursor, str):
-            raise CleanupError("Image Management returned an invalid pagination cursor")
-        return cursor
+        for key_reference, cursor_reference in value.items():
+            if not (
+                isinstance(key_reference, str)
+                and key_reference.startswith("_")
+                and key_reference[1:].isdigit()
+            ):
+                continue
+            key_index = int(key_reference[1:])
+            if key_index >= len(payload) or payload[key_index] != "lastEvaluatedKey":
+                continue
+            if type(cursor_reference) is int and cursor_reference == UNDEFINED_REFERENCE:
+                return None
+            if not (type(cursor_reference) is int and 0 <= cursor_reference < len(payload)):
+                raise CleanupError("Image Management returned an invalid pagination cursor")
+            cursor = payload[cursor_reference]
+            if not isinstance(cursor, str):
+                raise CleanupError("Image Management returned an invalid pagination cursor")
+            return cursor
     return None

@@ -1,9 +1,10 @@
 from datetime import UTC, datetime
+from threading import Barrier
 
 import pytest
 
 from dockerhub_cleanup.domain import Candidate, Tag
-from dockerhub_cleanup.errors import CleanupError
+from dockerhub_cleanup.errors import CleanupError, ReferencedManifestError
 from dockerhub_cleanup.service import CleanupPlan, CleanupService
 
 OLD = datetime(2025, 1, 1, tzinfo=UTC)
@@ -101,6 +102,24 @@ def test_plan_combines_stale_and_untagged_without_duplicate_tag_fetches() -> Non
     assert discovery.calls == [("user", "one")]
     assert [(candidate.kind, candidate.reference) for candidate in plan.candidates] == [
         ("stale-tag", "old"),
+        ("untagged", DIGEST_A),
+        ("untagged", DIGEST_B),
+    ]
+
+
+def test_plan_keeps_digest_referenced_by_a_retained_tag() -> None:
+    hub = FakeHub()
+    hub.tags_by_repository["one"].append(Tag("one", "current", DIGEST_A, CUTOFF, CUTOFF))
+
+    plan = CleanupService(hub, FakeDiscovery()).plan(
+        "user",
+        repositories=["one"],
+        cutoff=CUTOFF,
+        include_untagged=True,
+    )
+
+    assert [(candidate.kind, candidate.reference) for candidate in plan.candidates] == [
+        ("stale-tag", "old"),
         ("untagged", DIGEST_B),
     ]
 
@@ -154,6 +173,53 @@ def test_apply_dispatches_each_candidate() -> None:
     assert manifests.calls == [("user", "one", DIGEST_B)]
 
 
+def test_apply_reports_final_results_through_progress_callbacks() -> None:
+    hub = FakeHub()
+    hub.delete_errors["bad"] = CleanupError("tag rejected")
+    manifests = FakeManifestDeletion()
+    plan = CleanupPlan(
+        "user",
+        (
+            Candidate("stale-tag", "one", "bad", "reason"),
+            Candidate("untagged", "one", DIGEST_B, "reason"),
+        ),
+    )
+    events: list[tuple[str, str]] = []
+
+    CleanupService(hub).apply(
+        plan,
+        manifests,
+        on_deleted=lambda candidate: events.append(("deleted", candidate.reference)),
+        on_failure=lambda failure: events.append(("failed", failure.candidate.reference)),
+    )
+
+    assert events == [("failed", "bad"), ("deleted", DIGEST_B)]
+
+
+def test_apply_keeps_progress_callbacks_optional_for_all_failure_kinds() -> None:
+    hub = FakeHub()
+    hub.delete_errors["bad"] = CleanupError("tag rejected")
+    manifests = FakeManifestDeletion()
+    manifests.errors[DIGEST_A] = CleanupError("manifest rejected")
+    manifests.errors[DIGEST_B] = ReferencedManifestError("manifest referenced")
+    plan = CleanupPlan(
+        "user",
+        (
+            Candidate("stale-tag", "one", "bad", "reason"),
+            Candidate("untagged", "one", DIGEST_A, "reason"),
+            Candidate("untagged", "one", DIGEST_B, "reason"),
+        ),
+    )
+
+    result = CleanupService(hub).apply(plan, manifests)
+
+    assert [failure.message for failure in result.failures] == [
+        "tag rejected",
+        "manifest rejected",
+        "manifest referenced",
+    ]
+
+
 def test_apply_requires_manifest_deletion_before_any_mutation() -> None:
     hub = FakeHub()
     plan = CleanupPlan(
@@ -166,6 +232,16 @@ def test_apply_requires_manifest_deletion_before_any_mutation() -> None:
 
     with pytest.raises(CleanupError, match="manifest deletion"):
         CleanupService(hub).apply(plan)
+    assert hub.delete_calls == []
+
+
+def test_apply_requires_positive_manifest_workers_before_mutation() -> None:
+    hub = FakeHub()
+    plan = CleanupPlan("user", (Candidate("stale-tag", "one", "old", "reason"),))
+
+    with pytest.raises(CleanupError, match="workers must be positive"):
+        CleanupService(hub).apply(plan, manifest_workers=0)
+
     assert hub.delete_calls == []
 
 
@@ -184,7 +260,12 @@ def test_apply_continues_after_tag_and_manifest_failures() -> None:
         ),
     )
 
-    result = CleanupService(hub).apply(plan, manifests)
+    reported_failures: list[str] = []
+    result = CleanupService(hub).apply(
+        plan,
+        manifests,
+        on_failure=lambda failure: reported_failures.append(failure.message),
+    )
 
     assert [candidate.reference for candidate in result.deleted] == ["good", DIGEST_B]
     assert [failure.message for failure in result.failures] == [
@@ -193,6 +274,79 @@ def test_apply_continues_after_tag_and_manifest_failures() -> None:
     ]
     assert len(hub.delete_calls) == 2
     assert len(manifests.calls) == 2
+    assert reported_failures == ["tag rejected", "manifest referenced"]
+
+
+def test_apply_retries_referenced_manifests_after_dependency_progress() -> None:
+    class DependencyManifestDeletion(FakeManifestDeletion):
+        def delete_digest(self, namespace: str, repository: str, digest: str) -> None:
+            if digest == DIGEST_B:
+                self.errors.pop(DIGEST_A)
+            super().delete_digest(namespace, repository, digest)
+
+    hub = FakeHub()
+    manifests = DependencyManifestDeletion()
+    manifests.errors[DIGEST_A] = ReferencedManifestError("manifest referenced")
+    plan = CleanupPlan(
+        "user",
+        (
+            Candidate("untagged", "one", DIGEST_A, "reason"),
+            Candidate("untagged", "one", DIGEST_B, "reason"),
+        ),
+    )
+
+    result = CleanupService(hub).apply(plan, manifests)
+
+    assert [candidate.reference for candidate in result.deleted] == [DIGEST_B, DIGEST_A]
+    assert result.failures == ()
+    assert [call[2] for call in manifests.calls] == [DIGEST_A, DIGEST_B, DIGEST_A]
+
+
+def test_apply_can_delete_independent_manifests_concurrently() -> None:
+    class ConcurrentManifestDeletion(FakeManifestDeletion):
+        def __init__(self) -> None:
+            super().__init__()
+            self.barrier = Barrier(2)
+
+        def delete_digest(self, namespace: str, repository: str, digest: str) -> None:
+            self.barrier.wait(timeout=10)
+            super().delete_digest(namespace, repository, digest)
+
+    manifests = ConcurrentManifestDeletion()
+    plan = CleanupPlan(
+        "user",
+        (
+            Candidate("untagged", "one", DIGEST_A, "reason"),
+            Candidate("untagged", "one", DIGEST_B, "reason"),
+        ),
+    )
+
+    result = CleanupService(FakeHub()).apply(plan, manifests, manifest_workers=2)
+
+    assert {candidate.reference for candidate in result.deleted} == {DIGEST_A, DIGEST_B}
+    assert result.failures == ()
+
+
+def test_apply_reports_referenced_manifests_when_no_dependency_progress() -> None:
+    hub = FakeHub()
+    manifests = FakeManifestDeletion()
+    manifests.errors[DIGEST_A] = ReferencedManifestError("still referenced")
+    plan = CleanupPlan(
+        "user",
+        (Candidate("untagged", "one", DIGEST_A, "reason"),),
+    )
+
+    reported_failures: list[str] = []
+    result = CleanupService(hub).apply(
+        plan,
+        manifests,
+        on_failure=lambda failure: reported_failures.append(failure.message),
+    )
+
+    assert result.deleted == ()
+    assert [failure.message for failure in result.failures] == ["still referenced"]
+    assert reported_failures == ["still referenced"]
+    assert len(manifests.calls) == 1
 
 
 def test_apply_accepts_an_empty_plan_without_manifest_client() -> None:

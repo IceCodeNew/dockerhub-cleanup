@@ -12,7 +12,7 @@ from dockerhub_cleanup.crane import (
     SubprocessRunner,
     resolve_crane_command,
 )
-from dockerhub_cleanup.errors import CleanupError
+from dockerhub_cleanup.errors import CleanupError, ReferencedManifestError
 
 
 class FakeRunner:
@@ -137,10 +137,21 @@ def test_login_exception_cleans_up_temporary_config() -> None:
 
 
 def test_delete_failure_reports_reference() -> None:
-    runner = FakeRunner([ok(), CommandResult(1, "", "still referenced")])
+    runner = FakeRunner([ok(), CommandResult(1, "", "secret registry response")])
     with (
         CraneClient("user", "pat", runner=runner, command=("crane",)) as client,
-        pytest.raises(CleanupError, match="user/app@sha256:abc.*still referenced"),
+        pytest.raises(CleanupError, match="user/app@sha256:abc") as raised,
+    ):
+        client.delete_digest("user", "app", "sha256:abc")
+    assert "secret registry response" not in str(raised.value)
+
+
+def test_referenced_delete_failure_is_classified_for_dependency_retry() -> None:
+    message = "image cannot be deleted as it is referenced by other images"
+    runner = FakeRunner([ok(), CommandResult(1, "", message)])
+    with (
+        CraneClient("user", "pat", runner=runner, command=("crane",)) as client,
+        pytest.raises(ReferencedManifestError, match="referenced by other images"),
     ):
         client.delete_digest("user", "app", "sha256:abc")
 

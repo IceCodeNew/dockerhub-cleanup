@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -13,7 +14,7 @@ from dockerhub_cleanup.domain import (
     select_stale_tags,
     select_untagged_digests,
 )
-from dockerhub_cleanup.errors import CleanupError
+from dockerhub_cleanup.errors import CleanupError, ReferencedManifestError
 
 
 class HubRepository(Protocol):
@@ -93,22 +94,23 @@ class CleanupService:
         candidates: list[Candidate] = []
         for repository in repository_names:
             tags = self._hub.tags(namespace, repository)
+            stale_tags: list[Candidate] = []
             if cutoff is not None:
-                candidates.extend(
-                    select_stale_tags(
-                        tags,
-                        cutoff,
-                        protected_patterns,
-                        include_never_pulled=include_never_pulled,
-                    )
+                stale_tags = select_stale_tags(
+                    tags,
+                    cutoff,
+                    protected_patterns,
+                    include_never_pulled=include_never_pulled,
                 )
+                candidates.extend(stale_tags)
             if include_untagged:
                 assert self._discovery is not None
+                stale_tag_names = {candidate.reference for candidate in stale_tags}
                 candidates.extend(
                     select_untagged_digests(
                         repository,
                         self._discovery.all_digests(namespace, repository),
-                        (tag.digest for tag in tags),
+                        (tag.digest for tag in tags if tag.name not in stale_tag_names),
                     )
                 )
         return CleanupPlan(namespace, tuple(candidates))
@@ -117,9 +119,15 @@ class CleanupService:
         self,
         plan: CleanupPlan,
         manifest_deletion: ManifestDeletion | None = None,
+        *,
+        on_deleted: Callable[[Candidate], None] | None = None,
+        on_failure: Callable[[DeletionFailure], None] | None = None,
+        manifest_workers: int = 1,
     ) -> ApplyResult:
         """Attempt every planned deletion and aggregate safe failures."""
 
+        if manifest_workers < 1:
+            raise CleanupError("manifest deletion workers must be positive")
         if (
             any(candidate.kind == "untagged" for candidate in plan.candidates)
             and manifest_deletion is None
@@ -128,23 +136,75 @@ class CleanupService:
 
         deleted: list[Candidate] = []
         failures: list[DeletionFailure] = []
+        pending_manifests: list[Candidate] = []
         for candidate in plan.candidates:
+            if candidate.kind == "untagged":
+                pending_manifests.append(candidate)
+                continue
             try:
-                if candidate.kind == "stale-tag":
-                    self._hub.delete_tag(
-                        plan.namespace,
-                        candidate.repository,
-                        candidate.reference,
-                    )
-                else:
-                    assert manifest_deletion is not None
-                    manifest_deletion.delete_digest(
-                        plan.namespace,
-                        candidate.repository,
-                        candidate.reference,
-                    )
+                self._hub.delete_tag(
+                    plan.namespace,
+                    candidate.repository,
+                    candidate.reference,
+                )
             except CleanupError as exc:
-                failures.append(DeletionFailure(candidate, str(exc)))
+                failure = DeletionFailure(candidate, str(exc))
+                failures.append(failure)
+                if on_failure is not None:
+                    on_failure(failure)
             else:
                 deleted.append(candidate)
+                if on_deleted is not None:
+                    on_deleted(candidate)
+
+        while pending_manifests:
+            deferred: list[DeletionFailure] = []
+            progress = False
+            assert manifest_deletion is not None
+            with ThreadPoolExecutor(max_workers=manifest_workers) as executor:
+                attempts = {
+                    executor.submit(
+                        _delete_manifest,
+                        manifest_deletion,
+                        plan.namespace,
+                        candidate,
+                    ): candidate
+                    for candidate in pending_manifests
+                }
+                for attempt in as_completed(attempts):
+                    candidate = attempts[attempt]
+                    error = attempt.result()
+                    if isinstance(error, ReferencedManifestError):
+                        deferred.append(DeletionFailure(candidate, str(error)))
+                    elif error is not None:
+                        failure = DeletionFailure(candidate, str(error))
+                        failures.append(failure)
+                        if on_failure is not None:
+                            on_failure(failure)
+                    else:
+                        deleted.append(candidate)
+                        progress = True
+                        if on_deleted is not None:
+                            on_deleted(candidate)
+            if not deferred:
+                break
+            if not progress:
+                failures.extend(deferred)
+                if on_failure is not None:
+                    for failure in deferred:
+                        on_failure(failure)
+                break
+            pending_manifests = [failure.candidate for failure in deferred]
         return ApplyResult(tuple(deleted), tuple(failures))
+
+
+def _delete_manifest(
+    deletion: ManifestDeletion,
+    namespace: str,
+    candidate: Candidate,
+) -> CleanupError | None:
+    try:
+        deletion.delete_digest(namespace, candidate.repository, candidate.reference)
+    except CleanupError as exc:
+        return exc
+    return None

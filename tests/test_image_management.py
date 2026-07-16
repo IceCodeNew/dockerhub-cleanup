@@ -7,7 +7,7 @@ import pytest
 
 from dockerhub_cleanup.errors import CleanupError
 from dockerhub_cleanup.http import HttpResponse
-from dockerhub_cleanup.image_management import ImageManagementClient
+from dockerhub_cleanup.image_management import USER_AGENT, ImageManagementClient
 
 
 class FakeTransport:
@@ -34,6 +34,10 @@ def response(payload: object) -> HttpResponse:
     return HttpResponse(200, {}, json.dumps(payload).encode())
 
 
+def cursor_payload(cursor: object) -> list[object]:
+    return [{"_1": -5 if cursor is None else 2}, "lastEvaluatedKey", cursor]
+
+
 def test_cookie_is_required() -> None:
     with pytest.raises(CleanupError, match="DH_COOKIE"):
         ImageManagementClient("")
@@ -46,7 +50,10 @@ def test_client_creates_default_transport() -> None:
     ) as factory:
         client = ImageManagementClient("session=secret")
         assert client.all_digests("user", "app") == set()
-    factory.assert_called_once_with()
+    factory.assert_called_once_with(
+        retries=2,
+        retry_methods=frozenset({"GET", "POST"}),
+    )
 
 
 def test_single_page_discovery_encodes_path_and_sends_session_headers() -> None:
@@ -63,6 +70,8 @@ def test_single_page_discovery_encodes_path_and_sends_session_headers() -> None:
         "Cookie": "session=secret",
         "X-Requested-With": "XMLHttpRequest",
         "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+        "Referer": "https://hub.docker.com/repository/docker/user%20name/app%2Fname/tags",
     }
     assert data is None
 
@@ -72,7 +81,7 @@ def test_discovery_follows_post_cursor_pages() -> None:
     digest_b = "sha256:" + "b" * 64
     transport = FakeTransport(
         [
-            response([digest_a, "lastEvaluatedKey", "cursor one"]),
+            response([*cursor_payload("cursor one"), digest_a]),
             response([digest_b]),
         ]
     )
@@ -84,6 +93,7 @@ def test_discovery_follows_post_cursor_pages() -> None:
     assert method == "POST"
     assert headers is not None
     assert headers["Content-Type"] == "application/x-www-form-urlencoded"
+    assert headers["Referer"] == "https://hub.docker.com/repository/docker/user/app/tags"
     assert urllib.parse.parse_qs((data or b"").decode()) == {
         "intent": ["paginate"],
         "lastEvaluatedKey": ["cursor one"],
@@ -93,8 +103,8 @@ def test_discovery_follows_post_cursor_pages() -> None:
 def test_repeated_cursor_is_rejected() -> None:
     transport = FakeTransport(
         [
-            response(["lastEvaluatedKey", "same"]),
-            response(["lastEvaluatedKey", "same"]),
+            response(cursor_payload("same")),
+            response(cursor_payload("same")),
         ]
     )
     client = ImageManagementClient("session=secret", transport=transport)
@@ -103,12 +113,31 @@ def test_repeated_cursor_is_rejected() -> None:
         client.all_digests("user", "app")
 
 
+def test_terminal_cursor_field_without_value_stops_pagination() -> None:
+    digest = "sha256:" + "a" * 64
+    client = ImageManagementClient(
+        "session=secret",
+        transport=FakeTransport([response([*cursor_payload(None), digest])]),
+    )
+
+    assert client.all_digests("user", "app") == {digest}
+
+
+def test_unrelated_encoded_fields_do_not_start_pagination() -> None:
+    payload = [{"_1": 2}, "anotherField", "value"]
+    client = ImageManagementClient("session=secret", transport=FakeTransport([response(payload)]))
+
+    assert client.all_digests("user", "app") == set()
+
+
 @pytest.mark.parametrize(
     "payload",
     [
         {},
-        ["lastEvaluatedKey"],
-        ["lastEvaluatedKey", 3],
+        [{"_1": 2}, "lastEvaluatedKey"],
+        [{"_1": 2}, "lastEvaluatedKey", 3],
+        [{"_1": True}, "lastEvaluatedKey"],
+        [{"_1": -5.0}, "lastEvaluatedKey"],
     ],
 )
 def test_invalid_response_or_cursor_is_rejected(payload: object) -> None:
