@@ -6,7 +6,7 @@ import argparse
 import getpass
 import os
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack
 from datetime import datetime
 from typing import Protocol, TextIO
@@ -17,6 +17,7 @@ from dockerhub_cleanup.domain import Candidate, parse_cutoff
 from dockerhub_cleanup.errors import CleanupError
 from dockerhub_cleanup.image_management import ImageManagementClient
 from dockerhub_cleanup.service import (
+    CleanupPlan,
     CleanupService,
     DeletionFailure,
     DigestDiscovery,
@@ -35,6 +36,7 @@ class CraneOperations(ManifestDeletion, ManifestReachability, Protocol):
 
 CraneFactory = Callable[[str, str], AbstractContextManager[CraneOperations]]
 MANIFEST_DELETE_WORKERS = 4
+CANDIDATE_KIND_MIN_WIDTH = 10
 
 
 def cutoff_argument(value: str) -> datetime:
@@ -170,8 +172,8 @@ def _run(
             file=stdout,
             flush=True,
         )
-        for candidate in plan.candidates:
-            print(_format_candidate(plan.namespace, candidate), file=stdout, flush=True)
+        for line in _format_candidates(plan):
+            print(line, file=stdout, flush=True)
 
         if not args.apply or not plan.candidates:
             return 0
@@ -208,5 +210,14 @@ def _reference(namespace: str, candidate: Candidate) -> str:
     return f"{namespace}/{candidate.repository}{separator}{candidate.reference}"
 
 
-def _format_candidate(namespace: str, candidate: Candidate) -> str:
-    return f"{candidate.kind:10} {_reference(namespace, candidate)}  {candidate.reason}"
+def _format_candidates(plan: CleanupPlan) -> Iterator[str]:
+    kind_width = max(
+        CANDIDATE_KIND_MIN_WIDTH,
+        max((len(candidate.kind) for candidate in plan.candidates), default=0),
+    )
+    for candidate in plan.candidates:
+        yield _format_candidate(plan.namespace, candidate, kind_width)
+
+
+def _format_candidate(namespace: str, candidate: Candidate, kind_width: int) -> str:
+    return f"{candidate.kind:<{kind_width}} {_reference(namespace, candidate)}  {candidate.reason}"

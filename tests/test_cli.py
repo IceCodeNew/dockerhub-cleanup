@@ -5,14 +5,14 @@ from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from io import StringIO
-from typing import Self
+from typing import Self, cast
 
 import pytest
 
-from dockerhub_cleanup.cli import CraneOperations, cutoff_argument, main
-from dockerhub_cleanup.domain import Tag
+from dockerhub_cleanup.cli import CraneOperations, _format_candidates, cutoff_argument, main
+from dockerhub_cleanup.domain import Candidate, CandidateKind, Tag
 from dockerhub_cleanup.errors import CleanupError
-from dockerhub_cleanup.service import DigestDiscovery, HubRepository
+from dockerhub_cleanup.service import CleanupPlan, DigestDiscovery, HubRepository
 
 OLD = datetime(2025, 1, 1, tzinfo=UTC)
 DIGEST_A = "sha256:" + "a" * 64
@@ -201,6 +201,44 @@ def test_dry_run_prints_candidates_without_deleting() -> None:
     assert factories.hub_credentials == ("login", "pat")
     assert factories.hub.deleted == []
     assert factories.crane_credentials is None
+
+
+def test_candidate_output_preserves_minimum_kind_width() -> None:
+    plan = CleanupPlan(
+        "user",
+        (
+            Candidate("stale-tag", "app", "old", "stale"),
+            Candidate("untagged", "app", DIGEST_A, "unused"),
+        ),
+    )
+
+    assert tuple(_format_candidates(plan)) == (
+        "stale-tag  user/app:old  stale",
+        f"untagged   user/app@{DIGEST_A}  unused",
+    )
+
+
+def test_candidate_output_expands_for_longer_future_kind() -> None:
+    long_kind = cast(CandidateKind, "archived-manifest")
+    plan = CleanupPlan(
+        "user",
+        (
+            Candidate("stale-tag", "app", "old", "stale"),
+            Candidate(long_kind, "app", "digest", "archived"),
+        ),
+    )
+
+    lines = tuple(_format_candidates(plan))
+
+    assert lines == (
+        "stale-tag         user/app:old  stale",
+        "archived-manifest user/app:digest  archived",
+    )
+    assert lines[0].index("user/") == lines[1].index("user/")
+
+
+def test_candidate_output_handles_empty_plan() -> None:
+    assert tuple(_format_candidates(CleanupPlan("user", ()))) == ()
 
 
 def test_empty_apply_plan_does_not_start_crane() -> None:
