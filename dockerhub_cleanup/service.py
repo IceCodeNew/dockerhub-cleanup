@@ -207,4 +207,6 @@ def _delete_manifest(
         deletion.delete_digest(namespace, candidate.repository, candidate.reference)
     except CleanupError as exc:
         return exc
+    except Exception as exc:
+        return CleanupError(f"unexpected {type(exc).__name__} during manifest deletion")
     return None
