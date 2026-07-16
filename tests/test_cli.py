@@ -6,6 +6,7 @@ from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from io import StringIO
 from typing import Self
+from unittest.mock import patch
 
 import pytest
 
@@ -18,7 +19,13 @@ from dockerhub_cleanup.cli import (
 )
 from dockerhub_cleanup.domain import Candidate, Tag
 from dockerhub_cleanup.errors import CleanupError
-from dockerhub_cleanup.service import CleanupPlan, DigestDiscovery, HubRepository
+from dockerhub_cleanup.service import (
+    ApplyResult,
+    CleanupPlan,
+    CleanupService,
+    DigestDiscovery,
+    HubRepository,
+)
 
 OLD = datetime(2025, 1, 1, tzinfo=UTC)
 DIGEST_A = "sha256:" + "a" * 64
@@ -160,6 +167,28 @@ def test_safety_validation_happens_before_authentication(argv: list[str], messag
     assert factories.hub_credentials is None
 
 
+@pytest.mark.parametrize("workers", ["0", "not-an-integer"])
+def test_manifest_workers_must_be_positive_before_authentication(workers: str) -> None:
+    factories = Factories()
+
+    with pytest.raises(SystemExit, match="2"):
+        run_cli(
+            [
+                "--namespace",
+                "user",
+                "--untagged",
+                "--manifest-workers",
+                workers,
+            ],
+            environ={"DH_PAT": "pat", "DH_COOKIE": "session=cookie"},
+            factories=factories,
+        )
+
+    assert factories.hub_credentials is None
+    assert factories.discovery_cookie is None
+    assert factories.crane_credentials is None
+
+
 def test_pat_is_required_in_noninteractive_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -296,6 +325,28 @@ def test_apply_untagged_uses_cookie_and_crane() -> None:
     assert factories.crane.deleted == [DIGEST_B]
     assert factories.crane.reachability_calls == [("user", "app", {DIGEST_A})]
     assert not factories.crane.entered
+
+
+def test_apply_passes_manifest_workers_to_service() -> None:
+    with patch.object(CleanupService, "apply", autospec=True) as apply:
+        apply.return_value = ApplyResult((), ())
+        status, _, stderr, _ = run_cli(
+            [
+                "--namespace",
+                "user",
+                "--untagged",
+                "--manifest-workers",
+                "2",
+                "--apply",
+                "--confirm",
+                "user",
+            ],
+            environ={"DH_PAT": "pat", "DH_COOKIE": "session=cookie"},
+        )
+
+    assert status == 0
+    assert stderr == ""
+    assert apply.call_args.kwargs["manifest_workers"] == 2
 
 
 def test_untagged_dry_run_excludes_manifests_reachable_from_retained_tags() -> None:

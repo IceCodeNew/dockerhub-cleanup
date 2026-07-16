@@ -48,6 +48,18 @@ def cutoff_argument(value: str) -> datetime:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def positive_integer(value: str) -> int:
+    """Parse a strictly positive integer for bounded concurrency."""
+
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the public command-line contract."""
 
@@ -87,6 +99,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm",
         metavar="NAMESPACE",
         help="required with --apply and must exactly match --namespace",
+    )
+    parser.add_argument(
+        "--manifest-workers",
+        type=positive_integer,
+        default=MANIFEST_DELETE_WORKERS,
+        metavar="N",
+        help=f"maximum concurrent manifest deletions (default: {MANIFEST_DELETE_WORKERS})",
     )
     return parser
 
@@ -194,13 +213,14 @@ def _run(
                 crane,
                 on_deleted=report_deleted,
                 on_failure=report_failure,
-                manifest_workers=MANIFEST_DELETE_WORKERS,
+                manifest_workers=args.manifest_workers,
             )
         else:
             result = service.apply(
                 plan,
                 on_deleted=report_deleted,
                 on_failure=report_failure,
+                manifest_workers=args.manifest_workers,
             )
         return 1 if result.failures else 0
 
