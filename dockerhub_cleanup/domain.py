@@ -50,7 +50,7 @@ def parse_cutoff(value: str, now: datetime | None = None) -> datetime:
 
     relative = re.fullmatch(r"(\d+)([dhw])", value.strip().lower())
     if relative:
-        current = now or datetime.now(UTC)
+        current = datetime.now(UTC) if now is None else now
         if current.tzinfo is None:
             raise ValueError("the current time must include a timezone")
         amount = int(relative.group(1))
