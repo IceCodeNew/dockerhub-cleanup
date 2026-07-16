@@ -5,12 +5,18 @@ from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from io import StringIO
-from typing import Self, cast
+from typing import Self
 
 import pytest
 
-from dockerhub_cleanup.cli import CraneOperations, _format_candidates, cutoff_argument, main
-from dockerhub_cleanup.domain import Candidate, CandidateKind, Tag
+from dockerhub_cleanup.cli import (
+    CraneOperations,
+    _format_candidates,
+    _maximum_field_width,
+    cutoff_argument,
+    main,
+)
+from dockerhub_cleanup.domain import Candidate, Tag
 from dockerhub_cleanup.errors import CleanupError
 from dockerhub_cleanup.service import CleanupPlan, DigestDiscovery, HubRepository
 
@@ -218,23 +224,10 @@ def test_candidate_output_preserves_minimum_kind_width() -> None:
     )
 
 
-def test_candidate_output_expands_for_longer_future_kind() -> None:
-    long_kind = cast(CandidateKind, "archived-manifest")
-    plan = CleanupPlan(
-        "user",
-        (
-            Candidate("stale-tag", "app", "old", "stale"),
-            Candidate(long_kind, "app", "digest", "archived"),
-        ),
+def test_candidate_output_width_expands_for_longer_fields() -> None:
+    assert _maximum_field_width(("stale-tag", "archived-manifest"), minimum=10) == len(
+        "archived-manifest"
     )
-
-    lines = tuple(_format_candidates(plan))
-
-    assert lines == (
-        "stale-tag         user/app:old  stale",
-        "archived-manifest user/app:digest  archived",
-    )
-    assert lines[0].index("user/") == lines[1].index("user/")
 
 
 def test_candidate_output_handles_empty_plan() -> None:

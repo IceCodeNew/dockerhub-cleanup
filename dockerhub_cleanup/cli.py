@@ -6,7 +6,7 @@ import argparse
 import getpass
 import os
 import sys
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack
 from datetime import datetime
 from typing import Protocol, TextIO
@@ -211,9 +211,9 @@ def _reference(namespace: str, candidate: Candidate) -> str:
 
 
 def _format_candidates(plan: CleanupPlan) -> Iterator[str]:
-    kind_width = max(
-        CANDIDATE_KIND_MIN_WIDTH,
-        max((len(candidate.kind) for candidate in plan.candidates), default=0),
+    kind_width = _maximum_field_width(
+        (candidate.kind for candidate in plan.candidates),
+        minimum=CANDIDATE_KIND_MIN_WIDTH,
     )
     for candidate in plan.candidates:
         yield _format_candidate(plan.namespace, candidate, kind_width)
@@ -221,3 +221,7 @@ def _format_candidates(plan: CleanupPlan) -> Iterator[str]:
 
 def _format_candidate(namespace: str, candidate: Candidate, kind_width: int) -> str:
     return f"{candidate.kind:<{kind_width}} {_reference(namespace, candidate)}  {candidate.reason}"
+
+
+def _maximum_field_width(values: Iterable[str], *, minimum: int) -> int:
+    return max(minimum, max((len(value) for value in values), default=0))
