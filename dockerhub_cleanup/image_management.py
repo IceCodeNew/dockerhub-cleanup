@@ -108,7 +108,7 @@ def _next_cursor(payload: object) -> str | None:
             key_index = int(key_reference[1:])
             if key_index >= len(payload) or payload[key_index] != "lastEvaluatedKey":
                 continue
-            if cursor_reference == UNDEFINED_REFERENCE:
+            if type(cursor_reference) is int and cursor_reference == UNDEFINED_REFERENCE:
                 return None
             if not (type(cursor_reference) is int and 0 <= cursor_reference < len(payload)):
                 raise CleanupError("Image Management returned an invalid pagination cursor")

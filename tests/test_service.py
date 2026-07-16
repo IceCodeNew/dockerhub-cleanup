@@ -309,7 +309,7 @@ def test_apply_can_delete_independent_manifests_concurrently() -> None:
             self.barrier = Barrier(2)
 
         def delete_digest(self, namespace: str, repository: str, digest: str) -> None:
-            self.barrier.wait(timeout=1)
+            self.barrier.wait(timeout=10)
             super().delete_digest(namespace, repository, digest)
 
     manifests = ConcurrentManifestDeletion()

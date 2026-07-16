@@ -137,6 +137,7 @@ def test_unrelated_encoded_fields_do_not_start_pagination() -> None:
         [{"_1": 2}, "lastEvaluatedKey"],
         [{"_1": 2}, "lastEvaluatedKey", 3],
         [{"_1": True}, "lastEvaluatedKey"],
+        [{"_1": -5.0}, "lastEvaluatedKey"],
     ],
 )
 def test_invalid_response_or_cursor_is_rejected(payload: object) -> None:
