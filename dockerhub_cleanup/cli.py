@@ -7,9 +7,9 @@ import getpass
 import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, ExitStack
 from datetime import datetime
-from typing import TextIO
+from typing import Protocol, TextIO
 
 from dockerhub_cleanup.crane import CraneClient
 from dockerhub_cleanup.dockerhub import DockerHubClient
@@ -22,11 +22,18 @@ from dockerhub_cleanup.service import (
     DigestDiscovery,
     HubRepository,
     ManifestDeletion,
+    ManifestReachability,
 )
 
 HubFactory = Callable[[str, str], HubRepository]
 DiscoveryFactory = Callable[[str], DigestDiscovery]
-CraneFactory = Callable[[str, str], AbstractContextManager[ManifestDeletion]]
+
+
+class CraneOperations(ManifestDeletion, ManifestReachability, Protocol):
+    """Crane operations shared by planning and apply."""
+
+
+CraneFactory = Callable[[str, str], AbstractContextManager[CraneOperations]]
 MANIFEST_DELETE_WORKERS = 4
 
 
@@ -146,40 +153,40 @@ def _run(
 
     hub = hub_factory(username, pat)
     discovery = discovery_factory(cookie) if cookie and args.untagged else None
-    service = CleanupService(hub, discovery)
-    plan = service.plan(
-        args.namespace,
-        repositories=args.repositories,
-        cutoff=args.before,
-        include_untagged=args.untagged,
-        include_never_pulled=args.include_never_pulled,
-        keep_patterns=args.keep_tag,
-    )
-    mode = "APPLY" if args.apply else "DRY-RUN"
-    print(
-        f"{mode}: {len(plan.candidates)} candidate(s) in {plan.namespace}",
-        file=stdout,
-        flush=True,
-    )
-    for candidate in plan.candidates:
-        print(_format_candidate(plan.namespace, candidate), file=stdout, flush=True)
-
-    if not args.apply or not plan.candidates:
-        return 0
-
-    def report_deleted(candidate: Candidate) -> None:
-        print(f"deleted {_reference(plan.namespace, candidate)}", file=stdout, flush=True)
-
-    def report_failure(failure: DeletionFailure) -> None:
+    with ExitStack() as stack:
+        crane = stack.enter_context(crane_factory(username, pat)) if args.untagged else None
+        service = CleanupService(hub, discovery, crane)
+        plan = service.plan(
+            args.namespace,
+            repositories=args.repositories,
+            cutoff=args.before,
+            include_untagged=args.untagged,
+            include_never_pulled=args.include_never_pulled,
+            keep_patterns=args.keep_tag,
+        )
+        mode = "APPLY" if args.apply else "DRY-RUN"
         print(
-            f"ERROR: {_reference(plan.namespace, failure.candidate)}: {failure.message}",
-            file=stderr,
+            f"{mode}: {len(plan.candidates)} candidate(s) in {plan.namespace}",
+            file=stdout,
             flush=True,
         )
+        for candidate in plan.candidates:
+            print(_format_candidate(plan.namespace, candidate), file=stdout, flush=True)
 
-    has_untagged = any(candidate.kind == "untagged" for candidate in plan.candidates)
-    if has_untagged:
-        with crane_factory(username, pat) as crane:
+        if not args.apply or not plan.candidates:
+            return 0
+
+        def report_deleted(candidate: Candidate) -> None:
+            print(f"deleted {_reference(plan.namespace, candidate)}", file=stdout, flush=True)
+
+        def report_failure(failure: DeletionFailure) -> None:
+            print(
+                f"ERROR: {_reference(plan.namespace, failure.candidate)}: {failure.message}",
+                file=stderr,
+                flush=True,
+            )
+
+        if crane is not None:
             result = service.apply(
                 plan,
                 crane,
@@ -187,13 +194,13 @@ def _run(
                 on_failure=report_failure,
                 manifest_workers=MANIFEST_DELETE_WORKERS,
             )
-    else:
-        result = service.apply(
-            plan,
-            on_deleted=report_deleted,
-            on_failure=report_failure,
-        )
-    return 1 if result.failures else 0
+        else:
+            result = service.apply(
+                plan,
+                on_deleted=report_deleted,
+                on_failure=report_failure,
+            )
+        return 1 if result.failures else 0
 
 
 def _reference(namespace: str, candidate: Candidate) -> str:

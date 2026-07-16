@@ -33,6 +33,17 @@ class DigestDiscovery(Protocol):
     def all_digests(self, namespace: str, repository: str) -> set[str]: ...
 
 
+class ManifestReachability(Protocol):
+    """Read-only manifest graph traversal required for safe planning."""
+
+    def reachable_digests(
+        self,
+        namespace: str,
+        repository: str,
+        root_digests: Iterable[str],
+    ) -> set[str]: ...
+
+
 class ManifestDeletion(Protocol):
     """Known-digest deletion boundary."""
 
@@ -66,9 +77,15 @@ class ApplyResult:
 class CleanupService:
     """Build complete cleanup plans and apply them with partial-failure isolation."""
 
-    def __init__(self, hub: HubRepository, discovery: DigestDiscovery | None = None):
+    def __init__(
+        self,
+        hub: HubRepository,
+        discovery: DigestDiscovery | None = None,
+        reachability: ManifestReachability | None = None,
+    ):
         self._hub = hub
         self._discovery = discovery
+        self._reachability = reachability
 
     def plan(
         self,
@@ -86,6 +103,8 @@ class CleanupService:
             raise CleanupError("select at least one cleanup policy")
         if include_untagged and self._discovery is None:
             raise CleanupError("untagged cleanup requires an Image Management client")
+        if include_untagged and self._reachability is None:
+            raise CleanupError("untagged cleanup requires manifest reachability inspection")
 
         repository_names = (
             list(repositories) if repositories is not None else self._hub.repositories(namespace)
@@ -105,12 +124,19 @@ class CleanupService:
                 candidates.extend(stale_tags)
             if include_untagged:
                 assert self._discovery is not None
+                assert self._reachability is not None
                 stale_tag_names = {candidate.reference for candidate in stale_tags}
+                retained_roots = {tag.digest for tag in tags if tag.name not in stale_tag_names}
+                retained_digests = self._reachability.reachable_digests(
+                    namespace,
+                    repository,
+                    retained_roots,
+                )
                 candidates.extend(
                     select_untagged_digests(
                         repository,
                         self._discovery.all_digests(namespace, repository),
-                        (tag.digest for tag in tags if tag.name not in stale_tag_names),
+                        retained_digests,
                     )
                 )
         return CleanupPlan(namespace, tuple(candidates))
