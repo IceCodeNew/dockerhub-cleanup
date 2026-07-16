@@ -37,7 +37,7 @@
 6. 日志和异常不能输出 PAT、JWT、Cookie 或临时认证文件内容。
 7. 一个候选项删除失败不能阻止后续候选项继续处理；命令最终以非零状态报告部分失败。
 8. apply 模式必须逐项实时输出删除成功和最终失败结果，不能等待整个计划结束后再集中输出。
-9. 无 tag manifest 删除可以在单个隔离认证会话内有界并发；依赖冲突仍必须分轮处理，且并发不得扩大到 tag 删除。
+9. 无 tag manifest 删除可以在单个隔离认证会话内有界并发；默认并发度为 4，用户可以通过正整数 CLI 参数调整。参数必须在认证或删除前验证；依赖冲突仍必须分轮处理，且并发不得扩大到 tag 删除。
 
 ## CLI
 
@@ -49,6 +49,7 @@ CLI 至少提供以下选项：
 - `--include-never-pulled`：将从未拉取且 push 时间早于截止时间的 tag 纳入候选。
 - `--keep-tag`：可重复的 tag glob 保护规则。
 - `--untagged`：启用无 tag manifest 清理。
+- `--manifest-workers N`：无 tag manifest 删除并发度，必须为正整数，默认为 4。
 - `--apply --confirm <namespace>`：执行删除。
 
 用户必须至少选择 `--before` 或 `--untagged` 中的一项。

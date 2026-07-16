@@ -92,6 +92,7 @@ dockerhub-cleanup \
   --namespace your-docker-id \
   --before 180d \
   --untagged \
+  --manifest-workers 4 \
   --keep-tag latest \
   --apply \
   --confirm your-docker-id
@@ -101,7 +102,7 @@ dockerhub-cleanup \
 
 一个候选项失败不会阻止后续候选项。只要存在失败，命令最终返回非零状态。
 每个删除成功或最终失败的结果都会立即输出，便于观察长时间运行的清理任务。
-无 tag manifest 在同一依赖轮次内最多并发执行 4 个删除；引用冲突会延后到下一轮。
+无 tag manifest 在同一依赖轮次内默认最多并发执行 4 个删除；引用冲突会延后到下一轮。可以通过正整数 `--manifest-workers N` 调整删除并发度；该选项不改变 tag 删除的串行行为。
 
 ## 安全使用
 
